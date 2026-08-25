@@ -1,0 +1,279 @@
+"""腾讯文档导出 XLSX 导入：日期清洗、场站识别、去重入库。
+
+清洗原则：
+- 日期统一为 ISO 8601；无法确定年份时标记 DATE_UNRESOLVED 交人工，不让 AI 猜。
+- 场站识别优先级：显式场站列 -> Sheet 名 -> 别名词典 -> 正文关键词 -> 无法识别。
+- 内容哈希去重，同一文件重复导入不产生重复记录。
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import shutil
+from pathlib import Path
+
+import pandas as pd
+
+from app import config
+from app.models import ImportJob, SourceRecord, Station, new_id, now_iso
+
+_FULL_DATE = re.compile(r"(\d{4})\s*[./年\-]\s*(\d{1,2})\s*[./月\-]\s*(\d{1,2})")
+_MD_CN = re.compile(r"(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]?")
+_MD_DOT = re.compile(r"^(\d{1,2})[.．](\d{1,2})$")
+
+
+def parse_date(text, default_year: int | None) -> tuple[str | None, bool]:
+    """返回 (ISO日期或None, 是否未解析)。"""
+    if text is None:
+        return None, False
+    if isinstance(text, (pd.Timestamp,)):
+        return pd.Timestamp(text).strftime("%Y-%m-%d"), False
+    if hasattr(text, "strftime"):
+        try:
+            return text.strftime("%Y-%m-%d"), False
+        except Exception:
+            pass
+    s = str(text).strip()
+    if not s:
+        return None, False
+
+    m = _FULL_DATE.search(s)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    else:
+        m = _MD_CN.search(s) or _MD_DOT.match(s)
+        if not m:
+            # 有日期样式的文字但解析失败 -> 人工处理
+            if re.search(r"\d", s) and re.search(r"[日月./]", s):
+                return None, True
+            return None, False
+        if default_year is None:
+            return None, True  # DATE_UNRESOLVED
+        y = default_year
+        mo, d = int(m.group(1)), int(m.group(2))
+    try:
+        return f"{y:04d}-{mo:02d}-{d:02d}", False
+    except Exception:
+        return None, True
+
+
+def normalize_text(text: str) -> str:
+    return re.sub(r"\s+", "", str(text)).strip()
+
+
+def _station_alias_map(db) -> dict[int, list[str]]:
+    result: dict[int, list[str]] = {}
+    for st in db.query(Station).filter(Station.is_active == 1).all():
+        aliases = json.loads(st.aliases_json or "[]")
+        result[st.id] = [a.lower() for a in aliases] + [st.name.lower()]
+    return result
+
+
+def identify_station(db, *, station_col: str | None, sheet_name: str | None,
+                     text: str) -> int | None:
+    alias_map = _station_alias_map(db)
+
+    def match(s: str | None) -> int | None:
+        if not s:
+            return None
+        s_low = str(s).lower()
+        for sid, aliases in alias_map.items():
+            if any(a and a in s_low for a in aliases):
+                return sid
+        return None
+
+    # 优先级：显式场站列 -> Sheet名 -> 正文关键词
+    sid = match(station_col)
+    if sid:
+        return sid
+    sid = match(sheet_name)
+    if sid:
+        return sid
+    return match(text)
+
+
+def _content_hash(source_date: str | None, station_id: int | None,
+                  normalized: str) -> str:
+    raw = f"{source_date or ''}|{station_id or ''}|{normalized}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _find_col(columns: list[str], keywords: list[str]) -> str | None:
+    for col in columns:
+        c = str(col)
+        if any(k in c for k in keywords):
+            return col
+    return None
+
+
+def import_meeting_xlsx(db, file_path: Path, default_year: int | None = None,
+                        force_station_code: str | None = None) -> dict:
+    """导入班会记录 XLSX。"""
+    job = ImportJob(
+        id=new_id("imp"), source_type="tencent_xlsx", file_name=file_path.name
+    )
+    db.add(job)
+
+    # 存档原文件并计算 SHA256
+    data = file_path.read_bytes()
+    file_sha = hashlib.sha256(data).hexdigest()
+    job.file_sha256 = file_sha
+    archive = config.IMPORT_DIR / f"{job.id}_{file_path.name}"
+    shutil.copyfile(file_path, archive)
+
+    force_station_id = None
+    if force_station_code:
+        st = db.query(Station).filter(Station.code == force_station_code).first()
+        force_station_id = st.id if st else None
+
+    inserted, skipped, unresolved = 0, 0, []
+    try:
+        frames = pd.read_excel(file_path, sheet_name=None, engine="openpyxl",
+                               dtype=str)
+    except Exception as exc:  # noqa: BLE001
+        job.status = "failed"
+        job.error_message = str(exc)
+        job.finished_at = now_iso()
+        db.commit()
+        return {"status": "failed", "error": str(exc)}
+
+    for sheet_name, df in frames.items():
+        if df is None or df.empty:
+            continue
+        df = df.dropna(how="all")
+        columns = [str(c) for c in df.columns]
+        date_col = _find_col(columns, ["日期", "时间"])
+        content_col = _find_col(columns, ["内容", "记录", "事项", "工作"])
+        station_col = _find_col(columns, ["场站", "电站", "单位"])
+        # 兜底：第一列当日期，第二列当内容
+        if date_col is None and len(columns) >= 1:
+            date_col = columns[0]
+        if content_col is None and len(columns) >= 2:
+            content_col = columns[1]
+
+        for row_no, (_, row) in enumerate(df.iterrows(), start=2):
+            raw_content = row.get(content_col) if content_col else None
+            if raw_content is None or not str(raw_content).strip():
+                continue
+            raw_text = str(raw_content).strip()
+            date_raw = row.get(date_col) if date_col else None
+            source_date, unresolved = parse_date(date_raw, default_year)
+            if unresolved:
+                unresolved.append({"sheet": sheet_name, "row": row_no,
+                                   "date": str(date_raw)})
+
+            station_val = row.get(station_col) if station_col else None
+            station_id = (force_station_id
+                          or identify_station(db, station_col=station_val,
+                                              sheet_name=sheet_name, text=raw_text))
+
+            normalized = normalize_text(raw_text)
+            chash = _content_hash(source_date, station_id, normalized)
+            exists = (db.query(SourceRecord.id)
+                      .filter(SourceRecord.content_hash == chash).first())
+            if exists:
+                skipped += 1
+                continue
+
+            db.add(SourceRecord(
+                import_job_id=job.id,
+                source_type="tencent_xlsx",
+                source_date=source_date,
+                station_id=station_id,
+                sheet_name=str(sheet_name),
+                row_no=row_no,
+                raw_text=raw_text,
+                normalized_text=normalized,
+                raw_json=json.dumps(
+                    {str(k): (None if pd.isna(v) else str(v))
+                     for k, v in row.items()}, ensure_ascii=False),
+                content_hash=chash,
+            ))
+            inserted += 1
+
+    job.status = "success"
+    job.row_count = inserted
+    job.finished_at = now_iso()
+    db.commit()
+    return {"status": "success", "job_id": job.id, "inserted": inserted,
+            "skipped_duplicate": skipped, "date_unresolved": unresolved}
+
+
+def import_monthly_plan_xlsx(db, file_path: Path, plan_month: str,
+                             category: str = "monthly",
+                             station_code: str | None = None,
+                             default_year: int | None = None) -> dict:
+    """导入月度/季度定期工作计划 XLSX。"""
+    job = ImportJob(
+        id=new_id("imp"), source_type="monthly_plan_xlsx", file_name=file_path.name
+    )
+    db.add(job)
+    data = file_path.read_bytes()
+    job.file_sha256 = hashlib.sha256(data).hexdigest()
+    archive = config.IMPORT_DIR / f"{job.id}_{file_path.name}"
+    shutil.copyfile(file_path, archive)
+
+    station_id = None
+    if station_code:
+        st = db.query(Station).filter(Station.code == station_code).first()
+        station_id = st.id if st else None
+
+    inserted = 0
+    try:
+        frames = pd.read_excel(file_path, sheet_name=None, engine="openpyxl",
+                               dtype=str)
+    except Exception as exc:  # noqa: BLE001
+        job.status = "failed"
+        job.error_message = str(exc)
+        job.finished_at = now_iso()
+        db.commit()
+        return {"status": "failed", "error": str(exc)}
+
+    cat = category
+    for sheet_name, df in frames.items():
+        if df is None or df.empty:
+            continue
+        if "季度" in str(sheet_name):
+            cat = "quarterly"
+        df = df.dropna(how="all")
+        columns = [str(c) for c in df.columns]
+        title_col = _find_col(columns, ["工作内容", "内容", "事项", "工作"])
+        start_col = _find_col(columns, ["开始"])
+        end_col = _find_col(columns, ["结束", "截止", "完成时间"])
+        owner_col = _find_col(columns, ["完成人", "责任人", "负责人"])
+        status_col = _find_col(columns, ["完成情况", "状态"])
+        note_col = _find_col(columns, ["备注"])
+        if title_col is None:
+            title_col = columns[0]
+
+        for _, row in df.iterrows():
+            title = row.get(title_col)
+            if title is None or not str(title).strip():
+                continue
+            plan_start, _ = parse_date(row.get(start_col) if start_col else None,
+                                       default_year)
+            plan_end, _ = parse_date(row.get(end_col) if end_col else None,
+                                     default_year)
+            status_raw = str(row.get(status_col)).strip() if status_col and row.get(status_col) is not None else ""
+            status = "completed" if "已完成" in status_raw or status_raw == "完成" else "pending"
+            from app.models import MonthlyPlanItem
+            db.add(MonthlyPlanItem(
+                plan_month=plan_month,
+                scope_type="station" if station_id else "region",
+                station_id=station_id,
+                title=str(title).strip(),
+                category=cat,
+                plan_start=plan_start,
+                plan_end=plan_end,
+                owner=str(row.get(owner_col)).strip() if owner_col and row.get(owner_col) is not None else "",
+                status=status,
+                notes=str(row.get(note_col)).strip() if note_col and row.get(note_col) is not None else "",
+            ))
+            inserted += 1
+
+    job.status = "success"
+    job.row_count = inserted
+    job.finished_at = now_iso()
+    db.commit()
+    return {"status": "success", "job_id": job.id, "inserted": inserted}

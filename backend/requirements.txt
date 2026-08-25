@@ -1,0 +1,12 @@
+fastapi[standard]
+sqlalchemy
+pydantic
+python-dotenv
+python-multipart
+pandas
+openpyxl
+rapidfuzz
+docxtpl
+python-docx
+openai
+httpx
