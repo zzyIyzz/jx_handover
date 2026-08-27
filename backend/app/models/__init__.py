@@ -8,6 +8,7 @@ from app.models.models import (  # noqa: F401
     ImportJob,
     MonthlyPlanItem,
     SourceRecord,
+    Staff,
     Station,
     WorkItem,
     WorkItemUpdate,

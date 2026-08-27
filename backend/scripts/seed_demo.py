@@ -4,8 +4,10 @@
 覆盖验收要点：
 - #1SVG 跨三日记录（8.20/8.22/8.23）必须合并为一个事项
 - F08 与 F13 变频器网侧接地文字相似但设备不同，必须保持两个事项
-- 月计划含"8.28 截止未完成"项（8.23 交接不得判超期，白色）
-- 月计划含"8.22 截止未完成"项（8.23 交接必须判超期，红色）
+- 定期工作严格按内置模板库生成，种子只预置“实际完成状态”：
+  截止日≤交接日(8.23)的月度项默认已完成（绿）；
+  m21 上网电费结算保持未完成→超期（红）；
+  截止日晚于 8.23 的保持未完成→期限内（白）。
 """
 import hashlib
 import json
@@ -23,6 +25,15 @@ from app.models import (  # noqa: E402
     new_id,
     now_iso,
 )
+from app.services import periodic  # noqa: E402
+
+HANDOVER_DATE = "2026-08-23"
+# 演示：已完成但未填超期红的额外项（library_id -> 备注）
+EXTRA_COMPLETED = {
+    "q1": "钟宇完成I线，熊思奇完成II线III线巡视",
+}
+# 演示：截止日已过但保持未完成 -> 超期红（上网电费结算，截止 8.16）
+KEEP_OVERDUE = {"m21"}
 
 # ---- 修水班会记录（节选自真实交接班材料）----
 # (日期, 内容)
@@ -58,59 +69,41 @@ OUT_OF_WINDOW_RECORDS = [
     ("2026-08-25", "（未来记录）#1SVG厂家计划更换PWM板"),
 ]
 
-# ---- 月度定期工作计划（2026-08，修水）----
-# (标题, 开始, 结束, 完成人, 状态, 备注, 类别)
-PLAN_ITEMS = [
-    ("OMS月报及预测电量提交", None, "2026-08-01", "熊思奇", "已完成", "", "monthly"),
-    ("登机次数统计", None, "2026-08-04", "", "已完成",
-     "统计专责督察人员自行填写登机次数并审核", "monthly"),
-    ("避雷器月度检查表（纸质版）", None, "2026-08-06", "", "已完成", "", "monthly"),
-    ("电缆沟月度检查表（纸质版）", None, "2026-08-06", "", "已完成", "", "monthly"),
-    ("SF6压力月度检查表（纸质版）", None, "2026-08-06", "", "已完成", "", "monthly"),
-    ("设备测温月度检查表（纸质版）", None, "2026-08-06", "", "已完成", "", "monthly"),
-    ("消防设施月度检查表（纸质版）", None, "2026-08-06", "", "已完成",
-     "包含正压式呼吸器", "monthly"),
-    ("直流系统切换月度试验表（纸质版）", None, "2026-08-10", "", "已完成",
-     "", "monthly"),
-    ("UPS切换月度试验表（纸质版）", None, "2026-08-10", "", "已完成", "", "monthly"),
-    ("提交当月采购计划", None, "2026-08-10", "熊思奇", "已完成", "", "monthly"),
-    ("安全工器具月度检查表（纸质版）", None, "2026-08-14", "熊思奇",
-     "已完成", "", "monthly"),
-    ("应急物资检查（纸电版）", None, "2026-08-14", "熊思奇", "已完成",
-     "包括应急药品、防爆物资、消防物资、防汛物资", "monthly"),
-    ("专项清洁：空调滤网/气象装置/生产区地面/SVG/蓄电池月度清扫",
-     None, "2026-08-18", "熊思奇", "已完成", "", "monthly"),
-    ("事故预想", None, "2026-08-18", "熊思奇", "已完成", "生产管理系统",
-     "monthly"),
-    ("考问讲解", None, "2026-08-18", "熊思奇", "已完成", "生产管理系统",
-     "monthly"),
-    ("箱变月度巡检表（纸质版）", "2026-08-01", "2026-08-31", "", "未完成",
-     "", "monthly"),
-    ("风机月度巡检表（纸电版）", "2026-08-01", "2026-08-31", "", "未完成",
-     "", "monthly"),
-    ("叶片月度巡检表（纸电版）", "2026-08-01", "2026-08-31", "", "未完成",
-     "", "monthly"),
-    # 验收 F13：8.28 截止未完成，在 8.23 交接时不得判超期（白色）
-    ("升压站接地引下线改造", "2026-08-20", "2026-08-28", "盛林", "未完成",
-     "演示：截止8.28，交接日8.23不应判超期", "monthly"),
-    # 验收 F14：8.22 截止未完成，8.23 交接必须判超期（红色）
-    ("消防沙池更换", "2026-08-10", "2026-08-22", "", "未完成",
-     "演示：截止8.22，交接日8.23应判超期", "monthly"),
-    # 区间不相交：不应进入本班
-    ("9月安全日活动策划", "2026-09-01", "2026-09-15", "", "未完成",
-     "不应出现在8.14~8.23班次", "monthly"),
-    # 季度定期工作
-    ("输电线路巡视（纸质版）", "2026-07-01", "2026-09-30", "钟宇", "未完成",
-     "钟宇完成I线，熊思奇完成II线III线巡视", "quarterly"),
-    ("风机数据备份季度记录表（纸质版）", "2026-07-01", "2026-09-30", "",
-     "未完成", "", "quarterly"),
-    ("工控备份台账（电子版）", "2026-07-01", "2026-09-30", "", "未完成",
-     "", "quarterly"),
-    ("测风塔季度检查表（纸质版）", "2026-07-01", "2026-09-30", "", "未完成",
-     "", "quarterly"),
-    ("设备密码季度检查表（纸质版）", "2026-04-01", "2026-06-30", "", "已完成",
-     "上季度已完成，不应进入本班", "quarterly"),
-]
+# ---- 定期工作：种子只预置“实际完成状态”，项目清单由内置模板库生成 ----
+
+def seed_periodic_status(db):
+    """按 8.14~8.23 窗口筛选模板项，预置带 library_id 的执行记录；
+    create_batch 会幂等复用这些记录（同 library_id + plan_month）。"""
+    selected = periodic.select_for_window("2026-08-14", "2026-08-23",
+                                          HANDOVER_DATE)
+    total = done = 0
+    for cat in ("monthly", "quarterly", "yearly"):
+        for inst in selected[cat]:
+            tpl = inst["item"]
+            plan_end = inst["plan_end"]
+            completed = False
+            if tpl.library_id in EXTRA_COMPLETED:
+                completed = True
+            elif tpl.library_id not in KEEP_OVERDUE and plan_end \
+                    and plan_end <= HANDOVER_DATE:
+                completed = True
+            db.add(MonthlyPlanItem(
+                plan_month=HANDOVER_DATE[:7],
+                scope_type="region",
+                station_id=None,
+                title=tpl.name,
+                category=cat,
+                library_id=tpl.library_id,
+                plan_start=inst["plan_start"],
+                plan_end=plan_end,
+                owner=tpl.owner,
+                status="completed" if completed else "pending",
+                notes=EXTRA_COMPLETED.get(tpl.library_id, ""),
+            ))
+            total += 1
+            done += completed
+    return total, done
+
 
 DEVICE_CHANGES = [
     "#1SVG为检修状态",
@@ -159,25 +152,14 @@ def main():
                 content_hash=_hash(d, station.id, normalized),
             ))
 
-        for title, p_start, p_end, owner, status, notes, category in PLAN_ITEMS:
-            db.add(MonthlyPlanItem(
-                plan_month="2026-08",
-                scope_type="station",
-                station_id=station.id,
-                title=title,
-                category=category,
-                plan_start=p_start,
-                plan_end=p_end,
-                owner=owner,
-                status="completed" if status == "已完成" else "pending",
-                notes=notes,
-            ))
+        total, done = seed_periodic_status(db)
 
         db.commit()
         print("种子数据写入完成：")
         print(f"  班会记录 {len(MEETING_RECORDS)} 条（窗口内）"
               f" + {len(OUT_OF_WINDOW_RECORDS)} 条（窗口外，验收用）")
-        print(f"  月度/季度计划 {len(PLAN_ITEMS)} 条")
+        print(f"  定期工作执行记录 {total} 条（模板库筛选），"
+              f"其中已完成 {done} 条")
         print("  设备变更请在新建交接班后通过界面或接口添加：")
         for d in DEVICE_CHANGES:
             print(f"    - {d}")

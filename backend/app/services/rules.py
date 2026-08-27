@@ -10,7 +10,8 @@ COLOR_WHITE = "white"    # 普通 / 期限内未完成
 
 
 def professional_color(priority: str, status: str) -> str:
-    """专业工作颜色：紧急=红、重点=黄、其余=白。"""
+    """专业工作颜色：紧急=红（红底白字）、重点=黄（黄底黑字）、其余=白。
+    字体颜色由 renderer 按同规则处理。"""
     if priority == "urgent":
         return COLOR_RED
     if priority == "important":
@@ -49,3 +50,34 @@ def record_in_window(source_date: str | None, win_start: str, win_end: str) -> b
     if not source_date:
         return False
     return win_start <= source_date <= win_end
+
+
+# ---------- 排序 ----------
+
+_PRIORITY_ORDER = {"urgent": 0, "important": 1, "normal": 2}
+
+
+def sort_incomplete_first(rows: list[dict], colors: list[str],
+                          priorities: list[str] | None = None
+                          ) -> tuple[list[dict], list[str]]:
+    """强制排序：先未完成（超期优先、紧急>重点），后已完成；
+    行数据、行颜色（及可选优先级）同步重排。"""
+    n = len(rows)
+    idx = list(range(n))
+
+    def completed(i: int) -> int:
+        return 0 if rows[i].get("status_text") == "未完成" else 1
+
+    def overdue(i: int) -> int:
+        return 0 if colors[i] == "red" else 1
+
+    def prio(i: int) -> int:
+        if priorities is None:
+            return 0
+        return _PRIORITY_ORDER.get(priorities[i], 2)
+
+    idx.sort(key=lambda i: (completed(i), overdue(i), prio(i)))
+    new_rows = [rows[i] for i in idx]
+    new_colors = [colors[i] for i in idx]
+    new_prios = [priorities[i] for i in idx] if priorities else None
+    return new_rows, new_colors, new_prios  # type: ignore[return-value]

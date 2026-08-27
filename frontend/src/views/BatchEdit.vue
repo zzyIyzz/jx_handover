@@ -21,14 +21,26 @@
           <template #header>一、基本信息（值班人员）</template>
           <el-form inline>
             <el-form-item label="值班负责人">
-              <el-input v-model="metaForm.duty_leader" style="width: 140px" />
+              <el-select v-model="metaForm.duty_leader" filterable allow-create
+                         default-first-option style="width: 160px">
+                <el-option v-for="s in staffList" :key="s.id"
+                           :label="`${s.name}（${s.role}）`" :value="s.name" />
+              </el-select>
             </el-form-item>
             <el-form-item label="临时值班负责人">
-              <el-input v-model="metaForm.temp_leader" style="width: 140px" />
+              <el-select v-model="metaForm.temp_leader" filterable allow-create
+                         default-first-option style="width: 160px">
+                <el-option label="无" value="无" />
+                <el-option v-for="s in staffList" :key="s.id"
+                           :label="`${s.name}（${s.role}）`" :value="s.name" />
+              </el-select>
             </el-form-item>
             <el-form-item label="当班值班员">
-              <el-input v-model="operatorsInput" style="width: 260px"
-                        placeholder="多人用顿号或逗号分隔" />
+              <el-select v-model="operatorsList" multiple filterable allow-create
+                         default-first-option style="width: 300px">
+                <el-option v-for="s in staffList" :key="s.id"
+                           :label="`${s.name}（${s.role}）`" :value="s.name" />
+              </el-select>
             </el-form-item>
             <el-form-item>
               <el-button type="primary" plain @click="saveMeta">保存人员信息</el-button>
@@ -90,46 +102,54 @@
 
         <!-- 定期工作 -->
         <el-card class="section" shadow="never">
-          <template #header>六、定期工作完成情况（颜色由程序自动计算）</template>
-          <h4>6.1 月度定期工作</h4>
-          <el-table :data="st.general.monthly" border size="small"
-                    :row-style="rowStyle">
-            <el-table-column prop="title" label="工作内容" min-width="240" />
-            <el-table-column label="起止" width="190">
-              <template #default="{ row }">
-                {{ cnDate(row.plan_start) }} ~ {{ cnDate(row.plan_end) }}
-              </template>
-            </el-table-column>
-            <el-table-column label="完成情况" width="100" align="center">
-              <template #default="{ row }">
-                {{ row.status === 'completed' ? '已完成' : '未完成' }}
-              </template>
-            </el-table-column>
-            <el-table-column label="超期" width="80" align="center">
-              <template #default="{ row }">
-                <el-tag v-if="row.overdue" type="danger" size="small">超期</el-tag>
-              </template>
-            </el-table-column>
-          </el-table>
-          <h4>6.2 季度定期工作</h4>
-          <el-table :data="st.general.quarterly" border size="small" :row-style="rowStyle">
-            <el-table-column prop="title" label="工作内容" min-width="240" />
-            <el-table-column label="起止" width="190">
-              <template #default="{ row }">
-                {{ cnDate(row.plan_start) }} ~ {{ cnDate(row.plan_end) }}
-              </template>
-            </el-table-column>
-            <el-table-column label="完成情况" width="100" align="center">
-              <template #default="{ row }">
-                {{ row.status === 'completed' ? '已完成' : '未完成' }}
-              </template>
-            </el-table-column>
-            <el-table-column label="超期" width="80" align="center">
-              <template #default="{ row }">
-                <el-tag v-if="row.overdue" type="danger" size="small">超期</el-tag>
-              </template>
-            </el-table-column>
-          </el-table>
+          <template #header>
+            六、定期工作完成情况（内置模板库自动生成，颜色/排序由程序计算；可在线匹配实际完成情况）
+          </template>
+          <template v-for="sec in [
+            { key: 'monthly', title: '6.1 月度定期工作' },
+            { key: 'quarterly', title: '6.2 季度定期工作' },
+            { key: 'yearly', title: '6.3 年度定期工作' }
+          ]" :key="sec.key">
+            <h4>{{ sec.title }}（{{ (st.general as any)[sec.key].length }} 项）</h4>
+            <el-table :data="(st.general as any)[sec.key]" border size="small"
+                      :row-style="rowStyle">
+              <el-table-column label="工作内容" min-width="240">
+                <template #default="{ row }">
+                  <el-tooltip v-if="row.template_meta && row.template_meta.content"
+                              :content="row.template_meta.content" placement="top">
+                    <span>{{ row.title }}</span>
+                  </el-tooltip>
+                  <span v-else>{{ row.title }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="截止" width="110" align="center">
+                <template #default="{ row }">{{ cnDate(row.plan_end) }}</template>
+              </el-table-column>
+              <el-table-column label="完成情况" width="130" align="center">
+                <template #default="{ row }">
+                  <el-select :model-value="row.status" size="small" style="width: 100px"
+                             @change="(v: string) => saveGeneral(row, { status: v })">
+                    <el-option label="未完成" value="pending" />
+                    <el-option label="已完成" value="completed" />
+                  </el-select>
+                </template>
+              </el-table-column>
+              <el-table-column label="完成人" width="160">
+                <template #default="{ row }">
+                  <el-select :model-value="row.owner" size="small" filterable clearable
+                             allow-create default-first-option style="width: 130px"
+                             @change="(v: string) => saveGeneral(row, { owner: v || '' })">
+                    <el-option v-for="s in staffList" :key="s.id" :label="s.name" :value="s.name" />
+                  </el-select>
+                </template>
+              </el-table-column>
+              <el-table-column label="超期" width="80" align="center">
+                <template #default="{ row }">
+                  <el-tag v-if="row.overdue" type="danger" size="small">超期</el-tag>
+                </template>
+              </el-table-column>
+            </el-table>
+          </template>
         </el-card>
 
         <!-- 发布 -->
@@ -234,7 +254,8 @@ import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
   api, cnDate, COLOR_HEX, STATUS_LABEL,
-  type BatchDetail, type HandoverItemView, type SourceRow, type StationDetail
+  type BatchDetail, type GeneralItemView, type HandoverItemView,
+  type SourceRow, type Staff, type StationDetail
 } from '@/api'
 
 const route = useRoute()
@@ -255,7 +276,8 @@ const saving = ref(false)
 
 // 基本信息表单（随场站切换刷新）
 const metaForm = reactive({ duty_leader: '', temp_leader: '无' })
-const operatorsInput = ref('')
+const operatorsList = ref<string[]>([])
+const staffList = ref<Staff[]>([])
 const newDeviceChange = ref('')
 
 function currentStation(): StationDetail | null {
@@ -267,7 +289,7 @@ watch(activeStation, () => {
   if (st) {
     metaForm.duty_leader = st.duty_leader
     metaForm.temp_leader = st.temp_leader
-    operatorsInput.value = (st.operators || []).join('、')
+    operatorsList.value = [...(st.operators || [])]
   }
 })
 
@@ -280,6 +302,14 @@ async function load() {
     }
   } finally {
     loading.value = false
+  }
+}
+
+async function loadStaff() {
+  try {
+    staffList.value = await api.staff()
+  } catch {
+    staffList.value = []
   }
 }
 
@@ -372,14 +402,29 @@ function handleConflict(e: any) {
 async function saveMeta() {
   const st = currentStation()
   if (!st) return
-  const operators = operatorsInput.value.split(/[、,，\s]+/).filter(Boolean)
   await api.patchMeta(st.station_meta_id, {
     duty_leader: metaForm.duty_leader,
     temp_leader: metaForm.temp_leader,
-    operators
+    operators: operatorsList.value
   })
   ElMessage.success('人员信息已保存')
   await load()
+}
+
+async function saveGeneral(row: GeneralItemView, fields: Record<string, unknown>) {
+  try {
+    const r = await api.patchGeneralItem(row.id, row.revision, fields)
+    Object.assign(row, fields, { revision: r.revision })
+    // 颜色/超期由后端在下次详情返回时重算，这里先局部同步便于展示
+    if ('status' in fields) {
+      row.status = fields.status as string
+      row.color = row.status === 'completed' ? 'green'
+        : row.overdue ? 'red' : 'white'
+    }
+    ElMessage.success('定期工作完成情况已更新')
+  } catch (e: any) {
+    handleConflict(e)
+  }
 }
 
 async function addDevice(st: StationDetail) {
@@ -402,7 +447,10 @@ async function render(st: StationDetail) {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  loadStaff()
+})
 </script>
 
 <style scoped>

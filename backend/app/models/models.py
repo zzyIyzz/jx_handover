@@ -211,8 +211,11 @@ class MonthlyPlanItem(Base):
     scope_type = Column(Text, nullable=False, default="station")
     station_id = Column(Integer, ForeignKey("stations.id"))
     title = Column(Text, nullable=False)
-    # monthly|quarterly
+    # monthly|quarterly|yearly
     category = Column(Text, nullable=False, default="monthly")
+    # 内置模板库条目 ID（如 m14/q3/y7）；手工/演示条目为空，
+    # 用于跨班次幂等复用同一条模板项的执行记录。
+    library_id = Column(Text, nullable=False, default="")
     plan_start = Column(Text)
     plan_end = Column(Text)
     owner = Column(Text, nullable=False, default="")
@@ -261,6 +264,22 @@ class DeviceChange(Base):
     revision = Column(Integer, nullable=False, default=1)
     created_at = Column(Text, nullable=False, default=now_iso)
     updated_at = Column(Text, nullable=False, default=now_iso)
+
+
+class Staff(Base):
+    """内置值班人员字典：新增场站时直接复用或追加，无需改代码。
+    station_code="REGION" 表示片区通用人员（所有场站可选）。"""
+
+    __tablename__ = "staff"
+    __table_args__ = (Index("idx_staff_station", "station_code"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    station_code = Column(Text, nullable=False, default="REGION")
+    name = Column(Text, nullable=False)
+    role = Column(Text, nullable=False, default="现场值守")
+    note = Column(Text, nullable=False, default="")
+    is_active = Column(Integer, nullable=False, default=1)
+    created_at = Column(Text, nullable=False, default=now_iso)
 
 
 class DocumentSnapshot(Base):

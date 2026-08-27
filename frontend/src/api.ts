@@ -47,6 +47,7 @@ export interface HandoverItemView {
 export interface GeneralItemView {
   id: string
   plan_id: string
+  library_id: string
   title: string
   category: string
   plan_start: string | null
@@ -57,6 +58,23 @@ export interface GeneralItemView {
   revision: number
   overdue: boolean
   color: string
+  template_meta: {
+    schedule: string
+    doc_list: string
+    doc_dir: string
+    content: string
+    reviewer: string
+    remark: string
+  } | null
+}
+
+export interface Staff {
+  id: string
+  station_code: string
+  name: string
+  role: string
+  note: string
+  is_active: boolean
 }
 
 export interface StationDetail {
@@ -68,7 +86,7 @@ export interface StationDetail {
   temp_leader: string
   operators: string[]
   items: HandoverItemView[]
-  general: { monthly: GeneralItemView[]; quarterly: GeneralItemView[] }
+  general: { monthly: GeneralItemView[]; quarterly: GeneralItemView[]; yearly: GeneralItemView[] }
   device_changes: { id: string; content: string }[]
   snapshots: { id: string; version: number; status: string; created_at: string; docx_path: string }[]
 }
@@ -116,6 +134,11 @@ export const api = {
     }).then(r => r.data),
   itemSources: (workItemId: string) =>
     http.get<SourceRow[]>(`/work-items/${workItemId}/sources`).then(r => r.data),
+  staff: (stationCode?: string) =>
+    http.get<Staff[]>('/staff', { params: stationCode ? { station_code: stationCode } : {} })
+      .then(r => r.data),
+  patchGeneralItem: (id: string, revision: number, fields: Record<string, unknown>) =>
+    http.patch(`/general-items/${id}`, { revision, ...fields }).then(r => r.data),
   render: (batchId: string, stationMetaId: string) =>
     http
       .post(`/handovers/${batchId}/render`, { station_meta_id: stationMetaId })
@@ -144,8 +167,8 @@ export const PRIORITY_LABEL: Record<string, string> = {
 }
 
 export const COLOR_HEX: Record<string, string> = {
-  red: '#F4CCCC',
-  yellow: '#FFF2CC',
-  green: '#D9EAD3',
+  red: '#FFA5A5',
+  yellow: '#FFFE83',
+  green: '#C6EFCE',
   white: '#FFFFFF'
 }

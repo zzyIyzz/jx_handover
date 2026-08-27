@@ -2,7 +2,7 @@
 
 新建交接班流程：
   专业记录闭区间硬过滤 -> 规则+AI 合并产生事项 -> 本班快照
-  通用工作区间相交筛选 -> 本班通用工作
+  内置定期工作模板库按周期自动筛选实例化 -> 本班定期工作（第六节）
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from app.models import (
     new_id,
     now_iso,
 )
-from app.services import merger, rules
+from app.services import merger, periodic, rules
 from app.services.ai.adapter import get_ai
 
 # 人工编辑允许的字段
@@ -34,6 +34,9 @@ _EDITABLE_FIELDS = (
     "blocker", "next_action", "previous_owner", "next_owner",
     "start_date", "end_date",
 )
+
+# 定期工作（通用工作）人工编辑允许的字段（匹配实际完成情况）
+_EDITABLE_GENERAL_FIELDS = ("status", "owner", "note")
 
 
 def create_batch(db, *, start_date: str, end_date: str, handover_date: str,
@@ -112,23 +115,45 @@ def create_batch(db, *, start_date: str, end_date: str, handover_date: str,
                 ai_confidence=0.0,
             ))
 
-        # ---- 通用工作：区间相交规则 ----
-        plans = (db.query(MonthlyPlanItem)
-                 .filter((MonthlyPlanItem.station_id == sid)
-                         | (MonthlyPlanItem.station_id.is_(None)))
-                 .all())
-        for plan in plans:
-            if not rules.plan_in_window(plan.plan_start, plan.plan_end,
-                                        start_date, end_date):
-                continue
-            db.add(HandoverGeneralItem(
-                batch_id=batch.id,
-                station_meta_id=meta.id,
-                monthly_plan_item_id=plan.id,
-                status=plan.status,
-                owner=plan.owner,
-                note=plan.notes,
-            ))
+        # ---- 定期工作：内置模板库按周期自动筛选实例化 ----
+        # 模板有的项全部生成、没有的严禁添加；实际完成情况由已有执行记录
+        # （同 library_id + plan_month 的 monthly_plan_items）携带，无记录默认未完成。
+        selected = periodic.select_for_window(start_date, end_date,
+                                              handover_date)
+        plan_month = handover_date[:7]
+        for cat in ("monthly", "quarterly", "yearly"):
+            for inst in selected[cat]:
+                tpl = inst["item"]
+                plan = (db.query(MonthlyPlanItem)
+                        .filter(MonthlyPlanItem.library_id == tpl.library_id,
+                                MonthlyPlanItem.plan_month == plan_month,
+                                ((MonthlyPlanItem.station_id == sid)
+                                 | (MonthlyPlanItem.station_id.is_(None))))
+                        .first())
+                if plan is None:
+                    plan = MonthlyPlanItem(
+                        plan_month=plan_month,
+                        scope_type="region",
+                        station_id=None,
+                        title=tpl.name,
+                        category=cat,
+                        library_id=tpl.library_id,
+                        plan_start=inst["plan_start"],
+                        plan_end=inst["plan_end"],
+                        owner=tpl.owner,
+                        status="pending",
+                        notes="",
+                    )
+                    db.add(plan)
+                    db.flush()
+                db.add(HandoverGeneralItem(
+                    batch_id=batch.id,
+                    station_meta_id=meta.id,
+                    monthly_plan_item_id=plan.id,
+                    status=plan.status,
+                    owner=plan.owner or "",
+                    note=plan.notes,
+                ))
 
         # ---- 设备变更：来自班次外的预设（可由 API 补充） ----
 
@@ -173,12 +198,13 @@ def batch_detail(db, batch_id: str) -> dict:
                 "revision": it.revision,
                 "source_ids": json.loads(it.source_ids_json or "[]"),
                 "color": rules.professional_color(it.priority, it.status),
+                # 强制规范：第三节仅紧急/重点；其余（含已完成普通项）归第四节
                 "section": ("important"
                             if it.priority in ("urgent", "important")
-                            or it.status == "completed" else "handover"),
+                            else "handover"),
             })
 
-        general_out = {"monthly": [], "quarterly": []}
+        general_out = {"monthly": [], "quarterly": [], "yearly": []}
         generals = (db.query(HandoverGeneralItem)
                     .filter(HandoverGeneralItem.station_meta_id == meta.id)
                     .all())
@@ -188,9 +214,11 @@ def batch_detail(db, batch_id: str) -> dict:
                 continue
             overdue = rules.is_overdue(g.status, plan.plan_end,
                                        batch.handover_date)
+            tpl = periodic.LIBRARY_BY_ID.get(plan.library_id or "")
             row = {
                 "id": g.id,
                 "plan_id": plan.id,
+                "library_id": plan.library_id,
                 "title": plan.title,
                 "category": plan.category,
                 "plan_start": plan.plan_start,
@@ -202,9 +230,19 @@ def batch_detail(db, batch_id: str) -> dict:
                 "overdue": overdue,
                 "color": rules.general_color(g.status, plan.plan_end,
                                              batch.handover_date),
+                "template_meta": ({
+                    "schedule": tpl.schedule,
+                    "doc_list": tpl.doc_list,
+                    "doc_dir": tpl.doc_dir,
+                    "content": tpl.content,
+                    "reviewer": tpl.reviewer,
+                    "remark": tpl.remark,
+                } if tpl else None),
             }
-            general_out["quarterly" if plan.category == "quarterly"
-                        else "monthly"].append(row)
+            if plan.category in ("quarterly", "yearly"):
+                general_out[plan.category].append(row)
+            else:
+                general_out["monthly"].append(row)
 
         devices = (db.query(DeviceChange)
                    .filter(DeviceChange.station_meta_id == meta.id).all())
@@ -308,6 +346,37 @@ def approve_item(db, item_id: str, revision: int | None) -> dict:
     db.commit()
     return {"id": item.id, "revision": item.revision,
             "review_status": item.review_status}
+
+
+def patch_general_item(db, item_id: str, revision: int,
+                       fields: dict) -> dict:
+    """定期工作执行记录编辑（匹配实际完成情况），乐观锁。
+    同步更新底层 MonthlyPlanItem，保证跨班次复用一致。
+    """
+    g = db.get(HandoverGeneralItem, item_id)
+    if g is None:
+        raise HTTPException(404, "定期工作记录不存在")
+    if g.revision != revision:
+        raise HTTPException(
+            409, {"code": "REVISION_CONFLICT",
+                  "message": "该记录已被其他用户修改，请刷新后重新编辑。",
+                  "current_revision": g.revision})
+    for key, value in fields.items():
+        if key in _EDITABLE_GENERAL_FIELDS:
+            setattr(g, key, value)
+    g.revision += 1
+    g.updated_at = now_iso()
+    plan = db.get(MonthlyPlanItem, g.monthly_plan_item_id)
+    if plan is not None:
+        if "status" in fields:
+            plan.status = fields["status"]
+        if "owner" in fields:
+            plan.owner = fields["owner"]
+        if "note" in fields:
+            plan.notes = fields["note"]
+    db.commit()
+    return {"id": g.id, "revision": g.revision, "status": g.status,
+            "owner": g.owner, "note": g.note}
 
 
 def patch_station_meta(db, meta_id: str, fields: dict) -> dict:
