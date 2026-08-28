@@ -70,6 +70,10 @@ class RenderReq(BaseModel):
     station_meta_id: str
 
 
+class BulkApproveReq(BaseModel):
+    station_meta_id: str
+
+
 @router.get("/handovers")
 def list_handovers(db: Session = Depends(get_db)):
     return hs.list_batches(db)
@@ -103,6 +107,20 @@ def patch_item(item_id: str, req: PatchItemReq, db: Session = Depends(get_db)):
 @router.post("/handover-items/{item_id}/approve")
 def approve_item(item_id: str, req: ApproveReq, db: Session = Depends(get_db)):
     return hs.approve_item(db, item_id, req.revision)
+
+
+@router.post("/handover-items/{item_id}/review")
+def review_item(item_id: str, req: PatchItemReq,
+                db: Session = Depends(get_db)):
+    fields = {k: v for k, v in req.model_dump(exclude={"revision"}).items()
+              if v is not None}
+    return hs.review_item(db, item_id, req.revision, fields)
+
+
+@router.post("/handovers/{batch_id}/approve-all")
+def approve_all_items(batch_id: str, req: BulkApproveReq,
+                      db: Session = Depends(get_db)):
+    return hs.approve_all_items(db, batch_id, req.station_meta_id)
 
 
 @router.patch("/handover-station-meta/{meta_id}")

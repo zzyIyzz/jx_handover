@@ -348,6 +348,51 @@ def approve_item(db, item_id: str, revision: int | None) -> dict:
             "review_status": item.review_status}
 
 
+def review_item(db, item_id: str, revision: int, fields: dict) -> dict:
+    """一次事务完成“保存修改 + 确认”，避免前端连续两次提交。"""
+    item = db.get(HandoverItem, item_id)
+    if item is None:
+        raise HTTPException(404, "事项不存在")
+    if item.revision != revision:
+        raise HTTPException(
+            409, {"code": "REVISION_CONFLICT",
+                  "message": "该事项已被其他用户修改，请刷新后重新编辑。",
+                  "current_revision": item.revision})
+    edited = False
+    for key, value in fields.items():
+        if key in _EDITABLE_FIELDS:
+            setattr(item, key, value)
+            edited = True
+    if edited:
+        item.human_edited = 1
+    item.review_status = "approved"
+    item.revision += 1
+    item.updated_at = now_iso()
+    db.commit()
+    return {"id": item.id, "revision": item.revision,
+            "review_status": item.review_status,
+            "human_edited": bool(item.human_edited)}
+
+
+def approve_all_items(db, batch_id: str, station_meta_id: str) -> dict:
+    """批量确认一个场站的全部待复核事项，单事务提交。"""
+    meta = db.get(HandoverStationMeta, station_meta_id)
+    if meta is None or meta.batch_id != batch_id:
+        raise HTTPException(404, "交接班或场站信息不存在")
+    pending = (db.query(HandoverItem)
+               .filter(HandoverItem.batch_id == batch_id,
+                       HandoverItem.station_meta_id == station_meta_id,
+                       HandoverItem.review_status == "pending")
+               .all())
+    updated_at = now_iso()
+    for item in pending:
+        item.review_status = "approved"
+        item.revision += 1
+        item.updated_at = updated_at
+    db.commit()
+    return {"approved": len(pending), "station_meta_id": station_meta_id}
+
+
 def patch_general_item(db, item_id: str, revision: int,
                        fields: dict) -> dict:
     """定期工作执行记录编辑（匹配实际完成情况），乐观锁。

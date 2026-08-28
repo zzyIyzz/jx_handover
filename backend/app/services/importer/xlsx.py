@@ -11,6 +11,7 @@ import hashlib
 import json
 import re
 import shutil
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -53,8 +54,9 @@ def parse_date(text, default_year: int | None) -> tuple[str | None, bool]:
         y = default_year
         mo, d = int(m.group(1)), int(m.group(2))
     try:
-        return f"{y:04d}-{mo:02d}-{d:02d}", False
-    except Exception:
+        parsed = date(y, mo, d)
+        return parsed.isoformat(), False
+    except (TypeError, ValueError):
         return None, True
 
 
@@ -127,7 +129,7 @@ def import_meeting_xlsx(db, file_path: Path, default_year: int | None = None,
         st = db.query(Station).filter(Station.code == force_station_code).first()
         force_station_id = st.id if st else None
 
-    inserted, skipped, unresolved = 0, 0, []
+    inserted, skipped, date_unresolved = 0, 0, []
     try:
         frames = pd.read_excel(file_path, sheet_name=None, engine="openpyxl",
                                dtype=str)
@@ -158,10 +160,10 @@ def import_meeting_xlsx(db, file_path: Path, default_year: int | None = None,
                 continue
             raw_text = str(raw_content).strip()
             date_raw = row.get(date_col) if date_col else None
-            source_date, unresolved = parse_date(date_raw, default_year)
-            if unresolved:
-                unresolved.append({"sheet": sheet_name, "row": row_no,
-                                   "date": str(date_raw)})
+            source_date, is_unresolved = parse_date(date_raw, default_year)
+            if is_unresolved:
+                date_unresolved.append({"sheet": sheet_name, "row": row_no,
+                                        "date": str(date_raw)})
 
             station_val = row.get(station_col) if station_col else None
             station_id = (force_station_id
@@ -197,7 +199,8 @@ def import_meeting_xlsx(db, file_path: Path, default_year: int | None = None,
     job.finished_at = now_iso()
     db.commit()
     return {"status": "success", "job_id": job.id, "inserted": inserted,
-            "skipped_duplicate": skipped, "date_unresolved": unresolved}
+            "skipped_duplicate": skipped,
+            "date_unresolved": date_unresolved}
 
 
 def import_monthly_plan_xlsx(db, file_path: Path, plan_month: str,
@@ -219,7 +222,7 @@ def import_monthly_plan_xlsx(db, file_path: Path, plan_month: str,
         st = db.query(Station).filter(Station.code == station_code).first()
         station_id = st.id if st else None
 
-    inserted = 0
+    inserted, skipped, date_unresolved = 0, 0, []
     try:
         frames = pd.read_excel(file_path, sheet_name=None, engine="openpyxl",
                                dtype=str)
@@ -230,12 +233,20 @@ def import_monthly_plan_xlsx(db, file_path: Path, plan_month: str,
         db.commit()
         return {"status": "failed", "error": str(exc)}
 
-    cat = category
+    from app.models import MonthlyPlanItem
+
+    # 同一个计划文件重复导入应保持幂等，避免使用者误点两次后出现重复行。
+    existing_keys = {
+        (p.station_id, p.category, normalize_text(p.title),
+         p.plan_start or "", p.plan_end or "")
+        for p in db.query(MonthlyPlanItem).filter(
+            MonthlyPlanItem.plan_month == plan_month).all()
+    }
+
     for sheet_name, df in frames.items():
         if df is None or df.empty:
             continue
-        if "季度" in str(sheet_name):
-            cat = "quarterly"
+        cat = "quarterly" if "季度" in str(sheet_name) else category
         df = df.dropna(how="all")
         columns = [str(c) for c in df.columns]
         title_col = _find_col(columns, ["工作内容", "内容", "事项", "工作"])
@@ -247,22 +258,33 @@ def import_monthly_plan_xlsx(db, file_path: Path, plan_month: str,
         if title_col is None:
             title_col = columns[0]
 
-        for _, row in df.iterrows():
+        for row_index, (_, row) in enumerate(df.iterrows(), start=2):
             title = row.get(title_col)
             if title is None or not str(title).strip():
                 continue
-            plan_start, _ = parse_date(row.get(start_col) if start_col else None,
-                                       default_year)
-            plan_end, _ = parse_date(row.get(end_col) if end_col else None,
-                                     default_year)
+            start_raw = row.get(start_col) if start_col else None
+            end_raw = row.get(end_col) if end_col else None
+            plan_start, start_unresolved = parse_date(start_raw, default_year)
+            plan_end, end_unresolved = parse_date(end_raw, default_year)
+            if start_unresolved or end_unresolved:
+                date_unresolved.append({
+                    "sheet": sheet_name,
+                    "row": row_index,
+                    "date": str(start_raw if start_unresolved else end_raw),
+                })
             status_raw = str(row.get(status_col)).strip() if status_col and row.get(status_col) is not None else ""
             status = "completed" if "已完成" in status_raw or status_raw == "完成" else "pending"
-            from app.models import MonthlyPlanItem
+            title_text = str(title).strip()
+            item_key = (station_id, cat, normalize_text(title_text),
+                        plan_start or "", plan_end or "")
+            if item_key in existing_keys:
+                skipped += 1
+                continue
             db.add(MonthlyPlanItem(
                 plan_month=plan_month,
                 scope_type="station" if station_id else "region",
                 station_id=station_id,
-                title=str(title).strip(),
+                title=title_text,
                 category=cat,
                 plan_start=plan_start,
                 plan_end=plan_end,
@@ -270,10 +292,13 @@ def import_monthly_plan_xlsx(db, file_path: Path, plan_month: str,
                 status=status,
                 notes=str(row.get(note_col)).strip() if note_col and row.get(note_col) is not None else "",
             ))
+            existing_keys.add(item_key)
             inserted += 1
 
     job.status = "success"
     job.row_count = inserted
     job.finished_at = now_iso()
     db.commit()
-    return {"status": "success", "job_id": job.id, "inserted": inserted}
+    return {"status": "success", "job_id": job.id, "inserted": inserted,
+            "skipped_duplicate": skipped,
+            "date_unresolved": date_unresolved}

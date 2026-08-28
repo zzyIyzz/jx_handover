@@ -109,6 +109,25 @@ export interface SourceRow {
   status_hint: string
 }
 
+export interface ImportResult {
+  status: 'success' | 'failed'
+  job_id?: string
+  inserted?: number
+  skipped_duplicate?: number
+  date_unresolved?: Array<{ sheet: string; row: number; date: string }>
+  error?: string
+}
+
+export interface RenderResult {
+  snapshot_id: string
+  version: number
+  sha256: string
+  docx_path: string
+  current_path: string
+  cloud_path: string | null
+  download_url: string
+}
+
 // ---------- API ----------
 export const api = {
   stations: () => http.get<Station[]>('/stations').then(r => r.data),
@@ -123,8 +142,14 @@ export const api = {
   batchDetail: (id: string) => http.get<BatchDetail>(`/handovers/${id}`).then(r => r.data),
   patchItem: (id: string, revision: number, fields: Record<string, unknown>) =>
     http.patch(`/handover-items/${id}`, { revision, ...fields }).then(r => r.data),
+  reviewItem: (id: string, revision: number, fields: Record<string, unknown>) =>
+    http.post(`/handover-items/${id}/review`, { revision, ...fields }).then(r => r.data),
   approveItem: (id: string, revision: number) =>
     http.post(`/handover-items/${id}/approve`, { revision }).then(r => r.data),
+  approveAll: (batchId: string, stationMetaId: string) =>
+    http.post<{ approved: number }>(`/handovers/${batchId}/approve-all`, {
+      station_meta_id: stationMetaId
+    }).then(r => r.data),
   patchMeta: (metaId: string, fields: Record<string, unknown>) =>
     http.patch(`/handover-station-meta/${metaId}`, fields).then(r => r.data),
   addDeviceChange: (batchId: string, stationMetaId: string, content: string) =>
@@ -141,9 +166,31 @@ export const api = {
     http.patch(`/general-items/${id}`, { revision, ...fields }).then(r => r.data),
   render: (batchId: string, stationMetaId: string) =>
     http
-      .post(`/handovers/${batchId}/render`, { station_meta_id: stationMetaId })
+      .post<RenderResult>(`/handovers/${batchId}/render`, { station_meta_id: stationMetaId })
       .then(r => r.data),
-  downloadUrl: (snapshotId: string) => `/api/documents/${snapshotId}/download`
+  downloadUrl: (snapshotId: string) => `/api/documents/${snapshotId}/download`,
+  importMeeting: (file: File, options: { defaultYear: number; stationCode?: string }) => {
+    const body = new FormData()
+    body.append('file', file)
+    body.append('default_year', String(options.defaultYear))
+    if (options.stationCode) body.append('station_code', options.stationCode)
+    return http.post<ImportResult>('/imports/xlsx', body, { timeout: 120000 }).then(r => r.data)
+  },
+  importPlan: (file: File, options: {
+    planMonth: string
+    category: string
+    defaultYear: number
+    stationCode?: string
+  }) => {
+    const body = new FormData()
+    body.append('file', file)
+    body.append('plan_month', options.planMonth)
+    body.append('category', options.category)
+    body.append('default_year', String(options.defaultYear))
+    if (options.stationCode) body.append('station_code', options.stationCode)
+    return http.post<ImportResult>('/imports/monthly-plan', body, { timeout: 120000 })
+      .then(r => r.data)
+  }
 }
 
 // ---------- 展示辅助 ----------
@@ -151,6 +198,19 @@ export function cnDate(iso: string | null | undefined): string {
   if (!iso) return '—'
   const [y, m, d] = iso.split('-')
   return `${Number(y)}.${Number(m)}.${Number(d)}`
+}
+
+export function cnDateTime(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  const value = new Date(iso)
+  if (Number.isNaN(value.getTime())) return iso
+  const parts = new Intl.DateTimeFormat('zh-CN', {
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false
+  }).formatToParts(value)
+  const part = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find(item => item.type === type)?.value || ''
+  return `${part('year')}.${part('month')}.${part('day')} ${part('hour')}:${part('minute')}`
 }
 
 export const STATUS_LABEL: Record<string, string> = {

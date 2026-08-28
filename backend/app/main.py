@@ -10,7 +10,9 @@ from fastapi.staticfiles import StaticFiles
 from app import config
 from app.api import handovers, imports
 
-app = FastAPI(title="江西片区智能交接班系统", version="0.1.0")
+APP_VERSION = "0.2.0"
+
+app = FastAPI(title="江西片区智能交接班系统", version=APP_VERSION)
 
 # 开发期允许 Vite dev server 跨域
 app.add_middleware(
@@ -26,7 +28,8 @@ app.include_router(handovers.router)
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "ai_mode": config.AI_MODE}
+    return {"status": "ok", "version": APP_VERSION,
+            "ai_mode": config.AI_MODE}
 
 
 # 生产构建存在时直接由 FastAPI 提供前端静态文件
