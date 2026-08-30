@@ -44,6 +44,8 @@ class ImportJob(Base):
     source_type = Column(Text, nullable=False)
     file_name = Column(Text)
     file_sha256 = Column(Text)
+    stored_path = Column(Text, nullable=False, default="")
+    parser_key = Column(Text, nullable=False, default="")
     status = Column(Text, nullable=False, default="running")  # running|success|failed
     row_count = Column(Integer, nullable=False, default=0)
     error_message = Column(Text)
@@ -175,6 +177,10 @@ class HandoverItem(Base):
     title_snapshot = Column(Text, nullable=False)
     status = Column(Text, nullable=False)
     priority = Column(Text, nullable=False)
+    # important=第三章；handover=第四章。优先级只负责颜色，不决定章节。
+    section = Column(Text, nullable=False, default="handover")
+    completed_by = Column(Text, nullable=False, default="")
+    sort_order = Column(Integer, nullable=False, default=0)
     summary = Column(Text, nullable=False, default="")
     latest_progress = Column(Text, nullable=False, default="")
     blocker = Column(Text, nullable=False, default="")
@@ -264,6 +270,60 @@ class DeviceChange(Base):
     revision = Column(Integer, nullable=False, default=1)
     created_at = Column(Text, nullable=False, default=now_iso)
     updated_at = Column(Text, nullable=False, default=now_iso)
+
+
+class ExternalAssessment(Base):
+    """第五章：对外委单位的考核。"""
+
+    __tablename__ = "external_assessments"
+    __table_args__ = (
+        Index("idx_external_assessment_meta_order", "station_meta_id", "sort_order"),
+    )
+
+    id = Column(Text, primary_key=True, default=lambda: new_id("ea"))
+    batch_id = Column(
+        Text, ForeignKey("handover_batches.id", ondelete="CASCADE"), nullable=False
+    )
+    station_meta_id = Column(
+        Text, ForeignKey("handover_station_meta.id", ondelete="CASCADE"), nullable=False
+    )
+    contractor = Column(Text, nullable=False, default="")
+    work_content = Column(Text, nullable=False, default="")
+    assessment = Column(Text, nullable=False, default="")
+    remark = Column(Text, nullable=False, default="")
+    sort_order = Column(Integer, nullable=False, default=0)
+    revision = Column(Integer, nullable=False, default=1)
+    source_type = Column(Text, nullable=False, default="manual")
+    source_json = Column(Text, nullable=False, default="{}")
+    created_at = Column(Text, nullable=False, default=now_iso)
+    updated_at = Column(Text, nullable=False, default=now_iso)
+
+
+class SectionImportPreview(Base):
+    """第三、四、五章的可编辑导入预览；提交前不写正式事项。"""
+
+    __tablename__ = "section_import_previews"
+    __table_args__ = (
+        Index("idx_section_import_preview_batch", "batch_id", "created_at"),
+    )
+
+    id = Column(Text, primary_key=True, default=lambda: new_id("preview"))
+    batch_id = Column(
+        Text, ForeignKey("handover_batches.id", ondelete="CASCADE"), nullable=False
+    )
+    station_meta_id = Column(
+        Text, ForeignKey("handover_station_meta.id", ondelete="CASCADE"), nullable=False
+    )
+    import_job_id = Column(Text, ForeignKey("import_jobs.id"), nullable=False)
+    parser_key = Column(Text, nullable=False)
+    source_file_name = Column(Text, nullable=False)
+    source_sha256 = Column(Text, nullable=False)
+    normalized_json = Column(Text, nullable=False, default="[]")
+    warnings_json = Column(Text, nullable=False, default="[]")
+    status = Column(Text, nullable=False, default="previewed")
+    result_json = Column(Text, nullable=False, default="{}")
+    created_at = Column(Text, nullable=False, default=now_iso)
+    committed_at = Column(Text)
 
 
 class Staff(Base):

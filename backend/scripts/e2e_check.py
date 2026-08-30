@@ -8,7 +8,7 @@ import os
 import sys
 import urllib.request
 
-BASE = "http://127.0.0.1:8080/api"
+BASE = "http://127.0.0.1:8765/api"
 OUT = os.path.join(os.environ.get("TEMP", "."), "e2e_report.txt")
 L = []
 

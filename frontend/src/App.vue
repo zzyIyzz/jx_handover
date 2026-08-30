@@ -12,7 +12,7 @@
         <div class="header-meta">
           <span class="safe-dot"></span>
           <span class="safe-text">数据本地保存</span>
-          <span class="version">V0.2 易用版</span>
+          <span class="version">V0.3.0 人性化完整六章版</span>
         </div>
       </div>
     </el-header>

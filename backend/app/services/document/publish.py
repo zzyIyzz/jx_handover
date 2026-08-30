@@ -42,22 +42,43 @@ def render_and_snapshot(db, batch_id: str, station_meta_id: str) -> dict:
                  "请先在编辑器中逐条确认。")
 
     station = db.get(Station, meta.station_id)
+    if station is None:
+        raise HTTPException(422, "第一章缺少有效场站，不能生成 Word。")
     data = mapper.build_context(db, batch, meta)
+
+    try:
+        validator.validate_context(data["ctx"])
+    except validator.DocumentValidationError as exc:
+        raise HTTPException(
+            422,
+            {"message": "生成前字段校验未通过", "errors": exc.errors},
+        ) from exc
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     file_name = (f"{station.name}交接班记录_"
                  f"{batch.start_date.replace('-', '')}-"
-                 f"{batch.end_date.replace('-', '')}_V.tmp.docx")
+                 f"{batch.end_date.replace('-', '')}_{stamp}.tmp.docx")
     tmp_path = config.GENERATED_DIR / file_name
-    renderer.render_word(config.WORD_TEMPLATE, data["ctx"], data["colors"],
-                         tmp_path)
-
-    # 校验 DOCX 结构，损坏禁止发布
     try:
-        validator.validate_docx(tmp_path)
-    except RuntimeError as exc:
+        renderer.render_word(
+            config.WORD_TEMPLATE,
+            data["ctx"],
+            data["colors"],
+            tmp_path,
+        )
+    except Exception as exc:  # noqa: BLE001
         tmp_path.unlink(missing_ok=True)
-        raise HTTPException(500, f"DOCX 校验失败，禁止发布：{exc}") from exc
+        raise HTTPException(500, f"Word 渲染失败：{exc}") from exc
+
+    # Validate ZIP, all six chapters, 6.1/6.2/6.3, headers and row counts.
+    try:
+        validation = validator.validate_docx(tmp_path, data["expected"])
+    except validator.DocumentValidationError as exc:
+        tmp_path.unlink(missing_ok=True)
+        raise HTTPException(
+            422,
+            {"message": "Word 结构校验未通过，已阻止发布", "errors": exc.errors},
+        ) from exc
 
     sha = hashlib.sha256(tmp_path.read_bytes()).hexdigest()
 
@@ -98,7 +119,14 @@ def render_and_snapshot(db, batch_id: str, station_meta_id: str) -> dict:
         station_meta_id=meta.id,
         version=version,
         status="published",
-        data_json=json.dumps(data["ctx"], ensure_ascii=False),
+        data_json=json.dumps(
+            {
+                "context": data["ctx"],
+                "expected": data["expected"],
+                "validation": validation,
+            },
+            ensure_ascii=False,
+        ),
         docx_path=str(final_path),
         sha256=sha,
         created_at=now_iso(),

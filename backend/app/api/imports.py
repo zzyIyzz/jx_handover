@@ -2,15 +2,23 @@ import tempfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from app import config
 from app.db import get_db
 from app.models import Station
+from app.services.importer import sections as section_importer
 from app.services.importer import xlsx as xlsx_importer
 
 router = APIRouter(prefix="/api", tags=["imports"])
 
 MAX_XLSX_BYTES = 50 * 1024 * 1024
+
+
+class CommitPreviewReq(BaseModel):
+    rows: list[dict] | None = None
 
 
 async def _save_upload(file: UploadFile, directory: str) -> Path:
@@ -70,3 +78,51 @@ async def import_monthly_plan(
         return xlsx_importer.import_monthly_plan_xlsx(
             db, tmp_path, plan_month=plan_month, category=category,
             station_code=station_code, default_year=default_year)
+
+
+@router.get("/imports/handover-template")
+def download_handover_template():
+    if not config.STANDARD_IMPORT_TEMPLATE.exists():
+        raise HTTPException(503, "标准导入模板尚未安装，请重新安装完整发布包。")
+    return FileResponse(
+        config.STANDARD_IMPORT_TEMPLATE,
+        filename="交接班系统标准导入模板_V0.3.0.xlsx",
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@router.post("/handovers/{batch_id}/imports/preview")
+async def preview_section_import(
+    batch_id: str,
+    station_meta_id: str = Form(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """解析 XLSX 并返回可编辑预览；此步骤不写入正式事项。"""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = await _save_upload(file, tmp_dir)
+        return section_importer.create_preview(
+            db, batch_id, station_meta_id, tmp_path)
+
+
+@router.get("/handovers/{batch_id}/imports/{preview_id}")
+def get_section_import_preview(
+    batch_id: str,
+    preview_id: str,
+    db: Session = Depends(get_db),
+):
+    result = section_importer.get_preview(db, preview_id)
+    if result["batch_id"] != batch_id:
+        raise HTTPException(404, "导入预览不存在")
+    return result
+
+
+@router.post("/handovers/{batch_id}/imports/{preview_id}/commit")
+def commit_section_import(
+    batch_id: str,
+    preview_id: str,
+    req: CommitPreviewReq,
+    db: Session = Depends(get_db),
+):
+    return section_importer.commit_preview(
+        db, batch_id, preview_id, req.rows)

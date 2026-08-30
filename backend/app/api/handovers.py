@@ -27,6 +27,9 @@ class PatchItemReq(BaseModel):
     title_snapshot: Optional[str] = None
     status: Optional[str] = None
     priority: Optional[str] = None
+    section: Optional[str] = None
+    completed_by: Optional[str] = None
+    sort_order: Optional[int] = None
     summary: Optional[str] = None
     latest_progress: Optional[str] = None
     blocker: Optional[str] = None
@@ -52,6 +55,62 @@ class DeviceChangeReq(BaseModel):
     content: str
 
 
+class PatchDeviceChangeReq(BaseModel):
+    revision: int
+    content: str
+
+
+class CreateItemReq(BaseModel):
+    station_meta_id: str
+    title_snapshot: str
+    status: str = "pending"
+    priority: str = "normal"
+    section: Optional[str] = None
+    completed_by: str = ""
+    summary: str = ""
+    latest_progress: str = ""
+    blocker: str = ""
+    next_action: str = ""
+    previous_owner: str = ""
+    next_owner: str = ""
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    sort_order: Optional[int] = None
+
+
+class RevisionReq(BaseModel):
+    revision: int
+
+
+class ReorderItemsReq(BaseModel):
+    station_meta_id: str
+    section: str
+    ordered_ids: list[str]
+
+
+class ExternalAssessmentReq(BaseModel):
+    station_meta_id: str
+    contractor: str = ""
+    work_content: str
+    assessment: str = ""
+    remark: str = ""
+    sort_order: Optional[int] = None
+
+
+class PatchExternalAssessmentReq(BaseModel):
+    revision: int
+    contractor: Optional[str] = None
+    work_content: Optional[str] = None
+    assessment: Optional[str] = None
+    remark: Optional[str] = None
+    sort_order: Optional[int] = None
+
+
+class ReorderExternalReq(BaseModel):
+    station_meta_id: str
+    ordered_ids: list[str]
+
+
 class PatchGeneralReq(BaseModel):
     revision: int
     status: Optional[str] = None
@@ -72,6 +131,7 @@ class RenderReq(BaseModel):
 
 class BulkApproveReq(BaseModel):
     station_meta_id: str
+    section: Optional[str] = None
 
 
 @router.get("/handovers")
@@ -97,11 +157,29 @@ def get_handover(batch_id: str, db: Session = Depends(get_db)):
     return hs.batch_detail(db, batch_id)
 
 
+@router.post("/handovers/{batch_id}/items")
+def create_item(batch_id: str, req: CreateItemReq,
+                db: Session = Depends(get_db)):
+    return hs.add_handover_item(db, batch_id, req.model_dump())
+
+
+@router.post("/handovers/{batch_id}/items/reorder")
+def reorder_items(batch_id: str, req: ReorderItemsReq,
+                  db: Session = Depends(get_db)):
+    return hs.reorder_handover_items(
+        db, batch_id, req.station_meta_id, req.section, req.ordered_ids)
+
+
 @router.patch("/handover-items/{item_id}")
 def patch_item(item_id: str, req: PatchItemReq, db: Session = Depends(get_db)):
-    fields = {k: v for k, v in req.model_dump(exclude={"revision"}).items()
-              if v is not None}
+    fields = req.model_dump(exclude={"revision"}, exclude_unset=True)
     return hs.patch_item(db, item_id, req.revision, fields)
+
+
+@router.delete("/handover-items/{item_id}")
+def delete_item(item_id: str, req: RevisionReq,
+                db: Session = Depends(get_db)):
+    return hs.delete_handover_item(db, item_id, req.revision)
 
 
 @router.post("/handover-items/{item_id}/approve")
@@ -112,15 +190,15 @@ def approve_item(item_id: str, req: ApproveReq, db: Session = Depends(get_db)):
 @router.post("/handover-items/{item_id}/review")
 def review_item(item_id: str, req: PatchItemReq,
                 db: Session = Depends(get_db)):
-    fields = {k: v for k, v in req.model_dump(exclude={"revision"}).items()
-              if v is not None}
+    fields = req.model_dump(exclude={"revision"}, exclude_unset=True)
     return hs.review_item(db, item_id, req.revision, fields)
 
 
 @router.post("/handovers/{batch_id}/approve-all")
 def approve_all_items(batch_id: str, req: BulkApproveReq,
                       db: Session = Depends(get_db)):
-    return hs.approve_all_items(db, batch_id, req.station_meta_id)
+    return hs.approve_all_items(
+        db, batch_id, req.station_meta_id, req.section)
 
 
 @router.patch("/handover-station-meta/{meta_id}")
@@ -133,6 +211,46 @@ def patch_meta(meta_id: str, req: PatchMetaReq, db: Session = Depends(get_db)):
 def add_device_change(batch_id: str, req: DeviceChangeReq,
                       db: Session = Depends(get_db)):
     return hs.add_device_change(db, batch_id, req.station_meta_id, req.content)
+
+
+@router.patch("/device-changes/{change_id}")
+def patch_device_change(change_id: str, req: PatchDeviceChangeReq,
+                        db: Session = Depends(get_db)):
+    return hs.patch_device_change(db, change_id, req.revision, req.content)
+
+
+@router.delete("/device-changes/{change_id}")
+def delete_device_change(change_id: str, req: RevisionReq,
+                         db: Session = Depends(get_db)):
+    return hs.delete_device_change(db, change_id, req.revision)
+
+
+@router.post("/handovers/{batch_id}/external-assessments")
+def add_external_assessment(batch_id: str, req: ExternalAssessmentReq,
+                            db: Session = Depends(get_db)):
+    return hs.add_external_assessment(db, batch_id, req.model_dump())
+
+
+@router.patch("/external-assessments/{row_id}")
+def patch_external_assessment(row_id: str, req: PatchExternalAssessmentReq,
+                              db: Session = Depends(get_db)):
+    fields = {key: value for key, value in
+              req.model_dump(exclude={"revision"}).items()
+              if value is not None}
+    return hs.patch_external_assessment(db, row_id, req.revision, fields)
+
+
+@router.delete("/external-assessments/{row_id}")
+def delete_external_assessment(row_id: str, req: RevisionReq,
+                               db: Session = Depends(get_db)):
+    return hs.delete_external_assessment(db, row_id, req.revision)
+
+
+@router.post("/handovers/{batch_id}/external-assessments/reorder")
+def reorder_external_assessments(batch_id: str, req: ReorderExternalReq,
+                                 db: Session = Depends(get_db)):
+    return hs.reorder_external_assessments(
+        db, batch_id, req.station_meta_id, req.ordered_ids)
 
 
 # ---------- 定期工作（内置模板库） ----------

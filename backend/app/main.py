@@ -9,8 +9,9 @@ from fastapi.staticfiles import StaticFiles
 
 from app import config
 from app.api import handovers, imports
+from app.bootstrap import initialize_application_data
 
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 
 app = FastAPI(title="江西片区智能交接班系统", version=APP_VERSION)
 
@@ -26,10 +27,21 @@ app.include_router(imports.router)
 app.include_router(handovers.router)
 
 
+@app.on_event("startup")
+def startup() -> None:
+    initialize_application_data()
+
+
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "version": APP_VERSION,
-            "ai_mode": config.AI_MODE}
+    return {
+        "status": "ok",
+        "service": "jx-handover",
+        "version": APP_VERSION,
+        "port": config.APP_PORT,
+        "host": config.APP_HOST,
+        "ai_mode": config.AI_MODE,
+    }
 
 
 # 生产构建存在时直接由 FastAPI 提供前端静态文件

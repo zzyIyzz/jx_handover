@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from app.models import (
     DeviceChange,
     DocumentSnapshot,
+    ExternalAssessment,
     HandoverBatch,
     HandoverGeneralItem,
     HandoverItem,
@@ -32,11 +33,26 @@ from app.services.ai.adapter import get_ai
 _EDITABLE_FIELDS = (
     "title_snapshot", "status", "priority", "summary", "latest_progress",
     "blocker", "next_action", "previous_owner", "next_owner",
-    "start_date", "end_date",
+    "start_date", "end_date", "section", "completed_by", "sort_order",
 )
 
 # 定期工作（通用工作）人工编辑允许的字段（匹配实际完成情况）
 _EDITABLE_GENERAL_FIELDS = ("status", "owner", "note")
+
+_SECTIONS = {"important", "handover"}
+_STATUSES = {"pending", "in_progress", "blocked", "completed", "unknown"}
+_PRIORITIES = {"urgent", "important", "normal"}
+
+
+def _validate_item_fields(fields: dict) -> None:
+    if "section" in fields and fields["section"] is not None and fields["section"] not in _SECTIONS:
+        raise HTTPException(422, "章节必须是第三章或第四章。")
+    if "status" in fields and fields["status"] not in _STATUSES:
+        raise HTTPException(422, "事项状态无效。")
+    if "priority" in fields and fields["priority"] not in _PRIORITIES:
+        raise HTTPException(422, "优先级无效。")
+    if "title_snapshot" in fields and not str(fields["title_snapshot"]).strip():
+        raise HTTPException(422, "工作内容不能为空。")
 
 
 def create_batch(db, *, start_date: str, end_date: str, handover_date: str,
@@ -81,7 +97,7 @@ def create_batch(db, *, start_date: str, end_date: str, handover_date: str,
                                                     start_date, end_date)]
         touched_items = merger.process_records(db, sid, window_records, ai)
 
-        for item in touched_items:
+        for item_index, item in enumerate(touched_items, start=1):
             updates = (db.query(WorkItemUpdate)
                        .filter(WorkItemUpdate.work_item_id == item.id,
                                WorkItemUpdate.update_date >= start_date,
@@ -101,6 +117,9 @@ def create_batch(db, *, start_date: str, end_date: str, handover_date: str,
                 title_snapshot=item.canonical_title,
                 status=item.status,
                 priority=item.priority,
+                section=("important" if item.status == "completed" else "handover"),
+                completed_by="",
+                sort_order=item_index,
                 summary=result.get("summary", ""),
                 latest_progress=result.get("latest_progress", ""),
                 blocker=result.get("blocker", ""),
@@ -177,7 +196,10 @@ def batch_detail(db, batch_id: str) -> dict:
 
         items_out = []
         items = (db.query(HandoverItem)
-                 .filter(HandoverItem.station_meta_id == meta.id).all())
+                 .filter(HandoverItem.station_meta_id == meta.id)
+                 .order_by(HandoverItem.section, HandoverItem.sort_order,
+                           HandoverItem.created_at)
+                 .all())
         for it in items:
             items_out.append({
                 "id": it.id,
@@ -185,6 +207,9 @@ def batch_detail(db, batch_id: str) -> dict:
                 "title": it.title_snapshot,
                 "status": it.status,
                 "priority": it.priority,
+                "section": it.section,
+                "completed_by": it.completed_by,
+                "sort_order": it.sort_order,
                 "summary": it.summary,
                 "latest_progress": it.latest_progress,
                 "blocker": it.blocker,
@@ -198,10 +223,6 @@ def batch_detail(db, batch_id: str) -> dict:
                 "revision": it.revision,
                 "source_ids": json.loads(it.source_ids_json or "[]"),
                 "color": rules.professional_color(it.priority, it.status),
-                # 强制规范：第三节仅紧急/重点；其余（含已完成普通项）归第四节
-                "section": ("important"
-                            if it.priority in ("urgent", "important")
-                            else "handover"),
             })
 
         general_out = {"monthly": [], "quarterly": [], "yearly": []}
@@ -246,6 +267,11 @@ def batch_detail(db, batch_id: str) -> dict:
 
         devices = (db.query(DeviceChange)
                    .filter(DeviceChange.station_meta_id == meta.id).all())
+        assessments = (db.query(ExternalAssessment)
+                       .filter(ExternalAssessment.station_meta_id == meta.id)
+                       .order_by(ExternalAssessment.sort_order,
+                                 ExternalAssessment.created_at)
+                       .all())
         snapshots = (db.query(DocumentSnapshot)
                      .filter(DocumentSnapshot.station_meta_id == meta.id)
                      .order_by(DocumentSnapshot.version.desc()).all())
@@ -260,8 +286,19 @@ def batch_detail(db, batch_id: str) -> dict:
             "operators": json.loads(meta.operators_json or "[]"),
             "items": items_out,
             "general": general_out,
-            "device_changes": [{"id": d.id, "content": d.content}
+            "device_changes": [{"id": d.id, "content": d.content,
+                                "revision": d.revision}
                                for d in devices],
+            "external_assessments": [{
+                "id": row.id,
+                "contractor": row.contractor,
+                "work_content": row.work_content,
+                "assessment": row.assessment,
+                "remark": row.remark,
+                "sort_order": row.sort_order,
+                "revision": row.revision,
+                "source_type": row.source_type,
+            } for row in assessments],
             "snapshots": [{"id": s.id, "version": s.version,
                            "status": s.status, "created_at": s.created_at,
                            "docx_path": s.docx_path} for s in snapshots],
@@ -319,6 +356,14 @@ def patch_item(db, item_id: str, revision: int, fields: dict) -> dict:
             409, {"code": "REVISION_CONFLICT",
                   "message": "该事项已被其他用户修改，请刷新后重新编辑。",
                   "current_revision": item.revision})
+    _validate_item_fields(fields)
+    moved = fields.get("section") not in (None, item.section)
+    if moved and "sort_order" not in fields:
+        highest = (db.query(HandoverItem.sort_order)
+                   .filter(HandoverItem.station_meta_id == item.station_meta_id,
+                           HandoverItem.section == fields["section"])
+                   .order_by(HandoverItem.sort_order.desc()).first())
+        fields["sort_order"] = (highest[0] if highest else 0) + 10
     for key, value in fields.items():
         if key in _EDITABLE_FIELDS:
             setattr(item, key, value)
@@ -358,6 +403,14 @@ def review_item(db, item_id: str, revision: int, fields: dict) -> dict:
             409, {"code": "REVISION_CONFLICT",
                   "message": "该事项已被其他用户修改，请刷新后重新编辑。",
                   "current_revision": item.revision})
+    _validate_item_fields(fields)
+    moved = fields.get("section") not in (None, item.section)
+    if moved and "sort_order" not in fields:
+        highest = (db.query(HandoverItem.sort_order)
+                   .filter(HandoverItem.station_meta_id == item.station_meta_id,
+                           HandoverItem.section == fields["section"])
+                   .order_by(HandoverItem.sort_order.desc()).first())
+        fields["sort_order"] = (highest[0] if highest else 0) + 10
     edited = False
     for key, value in fields.items():
         if key in _EDITABLE_FIELDS:
@@ -374,23 +427,29 @@ def review_item(db, item_id: str, revision: int, fields: dict) -> dict:
             "human_edited": bool(item.human_edited)}
 
 
-def approve_all_items(db, batch_id: str, station_meta_id: str) -> dict:
+def approve_all_items(db, batch_id: str, station_meta_id: str,
+                      section: str | None = None) -> dict:
     """批量确认一个场站的全部待复核事项，单事务提交。"""
     meta = db.get(HandoverStationMeta, station_meta_id)
     if meta is None or meta.batch_id != batch_id:
         raise HTTPException(404, "交接班或场站信息不存在")
-    pending = (db.query(HandoverItem)
-               .filter(HandoverItem.batch_id == batch_id,
-                       HandoverItem.station_meta_id == station_meta_id,
-                       HandoverItem.review_status == "pending")
-               .all())
+    query = (db.query(HandoverItem)
+             .filter(HandoverItem.batch_id == batch_id,
+                     HandoverItem.station_meta_id == station_meta_id,
+                     HandoverItem.review_status == "pending"))
+    if section is not None:
+        if section not in _SECTIONS:
+            raise HTTPException(422, "章节无效")
+        query = query.filter(HandoverItem.section == section)
+    pending = query.all()
     updated_at = now_iso()
     for item in pending:
         item.review_status = "approved"
         item.revision += 1
         item.updated_at = updated_at
     db.commit()
-    return {"approved": len(pending), "station_meta_id": station_meta_id}
+    return {"approved": len(pending), "station_meta_id": station_meta_id,
+            "section": section}
 
 
 def patch_general_item(db, item_id: str, revision: int,
@@ -456,11 +515,226 @@ def patch_station_meta(db, meta_id: str, fields: dict) -> dict:
 
 
 def add_device_change(db, batch_id: str, meta_id: str, content: str) -> dict:
+    meta = db.get(HandoverStationMeta, meta_id)
+    if meta is None or meta.batch_id != batch_id:
+        raise HTTPException(404, "交接班或场站信息不存在")
+    if not content.strip():
+        raise HTTPException(422, "设备变更内容不能为空")
     dc = DeviceChange(batch_id=batch_id, station_meta_id=meta_id,
-                      content=content)
+                      content=content.strip())
     db.add(dc)
     db.commit()
-    return {"id": dc.id, "content": dc.content}
+    return {"id": dc.id, "content": dc.content, "revision": dc.revision}
+
+
+def patch_device_change(db, change_id: str, revision: int, content: str) -> dict:
+    row = db.get(DeviceChange, change_id)
+    if row is None:
+        raise HTTPException(404, "设备变更不存在")
+    if row.revision != revision:
+        raise HTTPException(409, {"code": "REVISION_CONFLICT",
+                                  "message": "设备变更已被修改，请刷新。",
+                                  "current_revision": row.revision})
+    if not content.strip():
+        raise HTTPException(422, "设备变更内容不能为空")
+    row.content = content.strip()
+    row.revision += 1
+    row.updated_at = now_iso()
+    db.commit()
+    return {"id": row.id, "content": row.content, "revision": row.revision}
+
+
+def delete_device_change(db, change_id: str, revision: int) -> dict:
+    row = db.get(DeviceChange, change_id)
+    if row is None:
+        raise HTTPException(404, "设备变更不存在")
+    if row.revision != revision:
+        raise HTTPException(409, {"code": "REVISION_CONFLICT",
+                                  "message": "设备变更已被修改，请刷新。",
+                                  "current_revision": row.revision})
+    db.delete(row)
+    db.commit()
+    return {"deleted": row.id}
+
+
+def add_handover_item(db, batch_id: str, fields: dict) -> dict:
+    meta_id = fields.pop("station_meta_id", "")
+    meta = db.get(HandoverStationMeta, meta_id)
+    if meta is None or meta.batch_id != batch_id:
+        raise HTTPException(404, "交接班或场站信息不存在")
+    _validate_item_fields(fields)
+    title = str(fields.get("title_snapshot") or "").strip()
+    if not title:
+        raise HTTPException(422, "工作内容不能为空")
+    batch = db.get(HandoverBatch, batch_id)
+    status = fields.get("status", "pending")
+    priority = fields.get("priority", "normal")
+    section = fields.get("section") or (
+        "important" if status == "completed" else "handover"
+    )
+    highest = (db.query(HandoverItem.sort_order)
+               .filter(HandoverItem.station_meta_id == meta_id,
+                       HandoverItem.section == section)
+               .order_by(HandoverItem.sort_order.desc()).first())
+    sort_order = int(fields.get("sort_order") or ((highest[0] if highest else 0) + 10))
+    work = WorkItem(
+        station_id=meta.station_id,
+        canonical_title=title,
+        canonical_key="",
+        status=status,
+        priority=priority,
+        first_seen_date=fields.get("start_date") or batch.start_date,
+        last_seen_date=fields.get("end_date") or batch.handover_date,
+        is_closed=1 if status == "completed" else 0,
+    )
+    db.add(work)
+    db.flush()
+    item = HandoverItem(
+        batch_id=batch_id,
+        station_meta_id=meta_id,
+        work_item_id=work.id,
+        title_snapshot=title,
+        status=status,
+        priority=priority,
+        section=section,
+        completed_by=str(fields.get("completed_by") or ""),
+        sort_order=sort_order,
+        summary=str(fields.get("summary") or ""),
+        latest_progress=str(fields.get("latest_progress") or ""),
+        blocker=str(fields.get("blocker") or ""),
+        next_action=str(fields.get("next_action") or ""),
+        previous_owner=str(fields.get("previous_owner") or ""),
+        next_owner=str(fields.get("next_owner") or ""),
+        start_date=fields.get("start_date"),
+        end_date=fields.get("end_date"),
+        source_ids_json="[]",
+        review_status="approved",
+        human_edited=1,
+    )
+    db.add(item)
+    db.commit()
+    return {"id": item.id, "work_item_id": work.id,
+            "revision": item.revision, "section": item.section,
+            "sort_order": item.sort_order}
+
+
+def delete_handover_item(db, item_id: str, revision: int) -> dict:
+    item = db.get(HandoverItem, item_id)
+    if item is None:
+        raise HTTPException(404, "事项不存在")
+    if item.revision != revision:
+        raise HTTPException(409, {"code": "REVISION_CONFLICT",
+                                  "message": "该事项已被修改，请刷新。",
+                                  "current_revision": item.revision})
+    db.delete(item)
+    db.commit()
+    return {"deleted": item_id}
+
+
+def reorder_handover_items(db, batch_id: str, meta_id: str,
+                           section: str, ordered_ids: list[str]) -> dict:
+    if section not in _SECTIONS:
+        raise HTTPException(422, "章节无效")
+    meta = db.get(HandoverStationMeta, meta_id)
+    if meta is None or meta.batch_id != batch_id:
+        raise HTTPException(404, "交接班或场站信息不存在")
+    rows = (db.query(HandoverItem)
+            .filter(HandoverItem.station_meta_id == meta_id,
+                    HandoverItem.section == section).all())
+    current_ids = {row.id for row in rows}
+    if len(ordered_ids) != len(set(ordered_ids)) or set(ordered_ids) != current_ids:
+        raise HTTPException(409, "事项列表已变化，请刷新后重新排序。")
+    by_id = {row.id: row for row in rows}
+    updated_at = now_iso()
+    for index, row_id in enumerate(ordered_ids, start=1):
+        row = by_id[row_id]
+        row.sort_order = index * 10
+        row.revision += 1
+        row.updated_at = updated_at
+    db.commit()
+    return {"section": section, "ordered_ids": ordered_ids}
+
+
+def add_external_assessment(db, batch_id: str, fields: dict) -> dict:
+    meta_id = fields.get("station_meta_id", "")
+    meta = db.get(HandoverStationMeta, meta_id)
+    if meta is None or meta.batch_id != batch_id:
+        raise HTTPException(404, "交接班或场站信息不存在")
+    if not str(fields.get("work_content") or "").strip():
+        raise HTTPException(422, "工作内容不能为空")
+    highest = (db.query(ExternalAssessment.sort_order)
+               .filter(ExternalAssessment.station_meta_id == meta_id)
+               .order_by(ExternalAssessment.sort_order.desc()).first())
+    row = ExternalAssessment(
+        batch_id=batch_id,
+        station_meta_id=meta_id,
+        contractor=str(fields.get("contractor") or "").strip(),
+        work_content=str(fields.get("work_content") or "").strip(),
+        assessment=str(fields.get("assessment") or "").strip(),
+        remark=str(fields.get("remark") or "").strip(),
+        sort_order=int(fields.get("sort_order") or ((highest[0] if highest else 0) + 10)),
+        source_type=str(fields.get("source_type") or "manual"),
+        source_json=json.dumps(fields.get("source") or {}, ensure_ascii=False),
+    )
+    db.add(row)
+    db.commit()
+    return {"id": row.id, "revision": row.revision,
+            "sort_order": row.sort_order}
+
+
+def patch_external_assessment(db, row_id: str, revision: int,
+                              fields: dict) -> dict:
+    row = db.get(ExternalAssessment, row_id)
+    if row is None:
+        raise HTTPException(404, "外委考核记录不存在")
+    if row.revision != revision:
+        raise HTTPException(409, {"code": "REVISION_CONFLICT",
+                                  "message": "外委考核已被修改，请刷新。",
+                                  "current_revision": row.revision})
+    allowed = {"contractor", "work_content", "assessment", "remark", "sort_order"}
+    for key, value in fields.items():
+        if key in allowed:
+            setattr(row, key, value.strip() if isinstance(value, str) else value)
+    if not row.work_content:
+        raise HTTPException(422, "工作内容不能为空")
+    row.revision += 1
+    row.updated_at = now_iso()
+    db.commit()
+    return {"id": row.id, "revision": row.revision,
+            "sort_order": row.sort_order}
+
+
+def delete_external_assessment(db, row_id: str, revision: int) -> dict:
+    row = db.get(ExternalAssessment, row_id)
+    if row is None:
+        raise HTTPException(404, "外委考核记录不存在")
+    if row.revision != revision:
+        raise HTTPException(409, {"code": "REVISION_CONFLICT",
+                                  "message": "外委考核已被修改，请刷新。",
+                                  "current_revision": row.revision})
+    db.delete(row)
+    db.commit()
+    return {"deleted": row_id}
+
+
+def reorder_external_assessments(db, batch_id: str, meta_id: str,
+                                 ordered_ids: list[str]) -> dict:
+    meta = db.get(HandoverStationMeta, meta_id)
+    if meta is None or meta.batch_id != batch_id:
+        raise HTTPException(404, "交接班或场站信息不存在")
+    rows = (db.query(ExternalAssessment)
+            .filter(ExternalAssessment.station_meta_id == meta_id).all())
+    if len(ordered_ids) != len(set(ordered_ids)) or set(ordered_ids) != {r.id for r in rows}:
+        raise HTTPException(409, "外委考核列表已变化，请刷新后重新排序。")
+    by_id = {row.id: row for row in rows}
+    updated_at = now_iso()
+    for index, row_id in enumerate(ordered_ids, start=1):
+        row = by_id[row_id]
+        row.sort_order = index * 10
+        row.revision += 1
+        row.updated_at = updated_at
+    db.commit()
+    return {"ordered_ids": ordered_ids}
 
 
 def item_sources(db, work_item_id: str) -> list[dict]:
