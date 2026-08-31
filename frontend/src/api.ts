@@ -2,6 +2,52 @@ import axios from 'axios'
 
 export const http = axios.create({ baseURL: '/api', timeout: 60000 })
 
+let connectionUnavailable = false
+
+function publishConnectionState(online: boolean) {
+  if (online && !connectionUnavailable) return
+  if (!online && connectionUnavailable) return
+  connectionUnavailable = !online
+  window.dispatchEvent(new CustomEvent('jx-network-status', { detail: { online } }))
+  if (online) window.dispatchEvent(new CustomEvent('jx-data-refresh'))
+}
+
+http.interceptors.response.use(
+  response => {
+    publishConnectionState(true)
+    return response
+  },
+  error => {
+    if (error?.response) publishConnectionState(true)
+    else publishConnectionState(false)
+    if (error?.response?.status === 401) {
+      window.dispatchEvent(new CustomEvent('jx-session-expired'))
+    }
+    return Promise.reject(error)
+  }
+)
+
+export interface SessionOptions {
+  auth_required: boolean; access_code_required: boolean; mode: 'desktop' | 'server'; staff_names: string[]
+}
+export interface SessionState {
+  authenticated: boolean; name?: string; role?: 'admin' | 'operator'; staff_id?: number
+}
+export interface AiAdminStatus {
+  mode: 'qwen' | 'mock' | string; model: string; configured: boolean; base_url: string; key_hint: string
+}
+export interface AiConnectionResult {
+  ok: boolean; mode: string; model?: string; usage?: Record<string, number>; message: string
+}
+export interface AuditEventView {
+  id: string; actor_name: string; actor_role: string; method: string; request_path: string
+  response_status: number; client_ip: string; request_id: string; created_at: string
+}
+export interface BackupResult {
+  created_at: string; reason: string; database_file: string; sha256: string; size: number
+  local_path: string; manifest_path: string; nas_path: string | null; nas_error: string
+}
+
 export interface Station { id: number; code: string; name: string; aliases: string[] }
 export interface Staff {
   id: string; station_code: string; name: string; role: string; note: string; is_active: boolean
@@ -30,7 +76,7 @@ export interface ExternalAssessmentView {
   sort_order: number; revision: number; source_type: string
 }
 export interface StationDetail {
-  station_meta_id: string; station_id: number; station_code: string; station_name: string
+  station_meta_id: string; station_id: number; station_code: string; station_name: string; revision: number
   duty_leader: string; temp_leader: string; operators: string[]; items: HandoverItemView[]
   general: { monthly: GeneralItemView[]; quarterly: GeneralItemView[]; yearly: GeneralItemView[] }
   device_changes: DeviceChangeView[]; external_assessments: ExternalAssessmentView[]
@@ -57,24 +103,35 @@ export interface ImportPreviewRow {
   previous_owner?: string; next_owner?: string; start_date?: string | null; end_date?: string | null
   summary?: string; latest_progress?: string; blocker?: string; next_action?: string
   contractor?: string; work_content?: string; assessment?: string; remark?: string
+  ai_enriched?: boolean; ai_confidence?: number
   source: { sheet: string; row_no: number; raw: Record<string, unknown> }
 }
 export interface ImportPreview {
   id: string; batch_id: string; station_meta_id: string; parser_key: string
   source_file_name: string; source_sha256: string; status: string; rows: ImportPreviewRow[]
+  ai: { status: string; model: string; applied?: number; usage?: Record<string, number>; error?: string }
   warnings: Array<{ sheet: string; field: string; reason: string }>
   summary: { total: number; important: number; handover: number; external: number; invalid: number; duplicate: number }
   result: Record<string, unknown>
 }
 
 export const api = {
+  sessionOptions: () => http.get<SessionOptions>('/session/options').then(r => r.data),
+  sessionMe: () => http.get<SessionState>('/session/me').then(r => r.data),
+  sessionLogin: (name: string, accessCode: string) =>
+    http.post<SessionState>('/session/login', { name, access_code: accessCode }).then(r => r.data),
+  sessionLogout: () => http.post<SessionState>('/session/logout').then(r => r.data),
+  adminAiStatus: () => http.get<AiAdminStatus>('/admin/ai').then(r => r.data),
+  adminAiTest: () => http.post<AiConnectionResult>('/admin/ai/test', {}, { timeout: 120000 }).then(r => r.data),
+  adminAudit: (limit = 30) => http.get<AuditEventView[]>('/admin/audit', { params: { limit } }).then(r => r.data),
+  adminBackup: () => http.post<BackupResult>('/admin/backup', {}, { timeout: 120000 }).then(r => r.data),
   stations: () => http.get<Station[]>('/stations').then(r => r.data),
   listBatches: () => http.get<BatchSummary[]>('/handovers').then(r => r.data),
   createBatch: (body: Record<string, unknown>) =>
     http.post<{ id: string; status: string }>('/handovers', body).then(r => r.data),
   batchDetail: (id: string) => http.get<BatchDetail>(`/handovers/${id}`).then(r => r.data),
-  patchMeta: (id: string, fields: Record<string, unknown>) =>
-    http.patch(`/handover-station-meta/${id}`, fields).then(r => r.data),
+  patchMeta: (id: string, revision: number, fields: Record<string, unknown>) =>
+    http.patch(`/handover-station-meta/${id}`, { revision, ...fields }).then(r => r.data),
   staff: (stationCode?: string) => http.get<Staff[]>('/staff', {
     params: stationCode ? { station_code: stationCode } : {}
   }).then(r => r.data),

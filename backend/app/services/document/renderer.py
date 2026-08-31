@@ -76,13 +76,55 @@ def _style_row(row: _Row, color: str) -> None:
                 run.font.color.rgb = RGBColor(0, 0, 0)
 
 
+def _prevent_row_split(row: _Row) -> None:
+    """Keep one logical record on one page.
+
+    Word otherwise allows a tall row to break between pages.  Narrow owner
+    columns make this especially unpleasant because the final Chinese
+    character can appear alone above the next page's first real record.
+    """
+    tr_pr = row._tr.get_or_add_trPr()
+    marker = tr_pr.find(qn("w:cantSplit"))
+    if marker is None:
+        marker = OxmlElement("w:cantSplit")
+    else:
+        tr_pr.remove(marker)
+    marker.set(qn("w:val"), "true")
+    # Keep CT_TrPr child order schema-valid.  Word is usually tolerant of an
+    # appended property, but page-header repetition can become inconsistent
+    # in long tables when cantSplit appears after jc/tblHeader.
+    tr_pr.insert_element_before(
+        marker,
+        "w:trHeight",
+        "w:tblHeader",
+        "w:tblCellSpacing",
+        "w:jc",
+        "w:hidden",
+        "w:ins",
+        "w:del",
+        "w:trPrChange",
+    )
+
+
 def _repeat_header(table: Table) -> None:
-    tr_pr = table.rows[0]._tr.get_or_add_trPr()
+    header = table.rows[0]
+    _prevent_row_split(header)
+    tr_pr = header._tr.get_or_add_trPr()
     marker = tr_pr.find(qn("w:tblHeader"))
     if marker is None:
         marker = OxmlElement("w:tblHeader")
-        tr_pr.append(marker)
+    else:
+        tr_pr.remove(marker)
     marker.set(qn("w:val"), "true")
+    tr_pr.insert_element_before(
+        marker,
+        "w:tblCellSpacing",
+        "w:jc",
+        "w:hidden",
+        "w:ins",
+        "w:del",
+        "w:trPrChange",
+    )
 
 
 def _populate_table(
@@ -114,6 +156,7 @@ def _populate_table(
             _set_cell_text(target.cells[column], value)
         color = colors[index] if colors and index < len(colors) else "white"
         _style_row(target, color)
+        _prevent_row_split(target)
     _repeat_header(table)
 
 

@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""提取 修水眉毛山风电场交接班记录2026.8.14-2026.8.23(2).docx 的完整结构，供 Word 渲染格式对齐。"""
+"""提取命令行传入 DOCX 的完整结构，供 Word 渲染格式对齐。"""
 import os
+from pathlib import Path
+import sys
 from docx import Document
 from docx.oxml.ns import qn
 
-SRC = r"c:\Users\zzzaa\Documents\xwechat_files\wxid_g07jr3np4ghb22_6a3b\temp\RWTemp\2026-08\9e20f478899dc29eb19741386f9343c8\修水眉毛山风电场交接班记录2026.8.14-2026.8.23(2).docx"
 OUT = os.path.join(os.environ.get("TEMP", "."), "docx2_structure.txt")
 
 
@@ -29,7 +30,10 @@ def run_colors(run):
 
 
 def main():
-    doc = Document(SRC)
+    source = Path(sys.argv[1]).expanduser().resolve() if len(sys.argv) > 1 else None
+    if source is None or not source.is_file():
+        raise SystemExit("用法：python dump_docx2.py <参考模板.docx>")
+    doc = Document(source)
     lines = []
 
     # 按 body 顺序遍历段落与表格

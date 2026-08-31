@@ -281,6 +281,7 @@ def batch_detail(db, batch_id: str) -> dict:
             "station_id": meta.station_id,
             "station_code": station.code if station else "",
             "station_name": station.name if station else "",
+            "revision": meta.revision,
             "duty_leader": meta.duty_leader,
             "temp_leader": meta.temp_leader,
             "operators": json.loads(meta.operators_json or "[]"),
@@ -483,10 +484,16 @@ def patch_general_item(db, item_id: str, revision: int,
             "owner": g.owner, "note": g.note}
 
 
-def patch_station_meta(db, meta_id: str, fields: dict) -> dict:
+def patch_station_meta(db, meta_id: str, revision: int, fields: dict) -> dict:
     meta = db.get(HandoverStationMeta, meta_id)
     if meta is None:
         raise HTTPException(404, "场站班次信息不存在")
+    if meta.revision != revision:
+        raise HTTPException(409, {
+            "code": "REVISION_CONFLICT",
+            "message": "基本信息已被其他人修改，请刷新后重试。",
+            "current_revision": meta.revision,
+        })
     if "duty_leader" in fields:
         meta.duty_leader = fields["duty_leader"]
     if "temp_leader" in fields:
@@ -500,13 +507,21 @@ def patch_station_meta(db, meta_id: str, fields: dict) -> dict:
             (db.query(HandoverItem)
              .filter(HandoverItem.station_meta_id == meta_id,
                      HandoverItem.next_owner == "")
-             .update({HandoverItem.next_owner: ops[0]},
+             .update({
+                 HandoverItem.next_owner: ops[0],
+                 HandoverItem.revision: HandoverItem.revision + 1,
+                 HandoverItem.updated_at: now_iso(),
+             },
                      synchronize_session=False))
     if "duty_leader" in fields and fields["duty_leader"]:
         (db.query(HandoverItem)
          .filter(HandoverItem.station_meta_id == meta_id,
                  HandoverItem.previous_owner == "")
-         .update({HandoverItem.previous_owner: fields["duty_leader"]},
+         .update({
+             HandoverItem.previous_owner: fields["duty_leader"],
+             HandoverItem.revision: HandoverItem.revision + 1,
+             HandoverItem.updated_at: now_iso(),
+         },
                  synchronize_session=False))
     meta.revision += 1
     meta.updated_at = now_iso()

@@ -12,9 +12,10 @@ import json
 import re
 import shutil
 from datetime import date
+import math
 from pathlib import Path
 
-import pandas as pd
+from openpyxl import load_workbook
 
 from app import config
 from app.models import ImportJob, SourceRecord, Station, new_id, now_iso
@@ -28,8 +29,6 @@ def parse_date(text, default_year: int | None) -> tuple[str | None, bool]:
     """返回 (ISO日期或None, 是否未解析)。"""
     if text is None:
         return None, False
-    if isinstance(text, (pd.Timestamp,)):
-        return pd.Timestamp(text).strftime("%Y-%m-%d"), False
     if hasattr(text, "strftime"):
         try:
             return text.strftime("%Y-%m-%d"), False
@@ -109,6 +108,38 @@ def _find_col(columns: list[str], keywords: list[str]) -> str | None:
     return None
 
 
+def _is_blank(value) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, float) and math.isnan(value):
+        return True
+    return isinstance(value, str) and not value.strip()
+
+
+def _sheet_rows(sheet):
+    """Return stable header names and a streaming iterator of row dictionaries."""
+    iterator = sheet.iter_rows(values_only=True)
+    header = next(iterator, None)
+    if header is None:
+        return [], iter(())
+    columns: list[str] = []
+    used: dict[str, int] = {}
+    for index, value in enumerate(header, start=1):
+        base = str(value).strip() if not _is_blank(value) else f"未命名列{index}"
+        count = used.get(base, 0)
+        used[base] = count + 1
+        columns.append(base if count == 0 else f"{base}_{count + 1}")
+
+    def rows():
+        for row_no, values in enumerate(iterator, start=2):
+            padded = tuple(values) + (None,) * max(0, len(columns) - len(values))
+            row = dict(zip(columns, padded[:len(columns)]))
+            if any(not _is_blank(value) for value in row.values()):
+                yield row_no, row
+
+    return columns, rows()
+
+
 def import_meeting_xlsx(db, file_path: Path, default_year: int | None = None,
                         force_station_code: str | None = None) -> dict:
     """导入班会记录 XLSX。"""
@@ -131,8 +162,7 @@ def import_meeting_xlsx(db, file_path: Path, default_year: int | None = None,
 
     inserted, skipped, date_unresolved = 0, 0, []
     try:
-        frames = pd.read_excel(file_path, sheet_name=None, engine="openpyxl",
-                               dtype=str)
+        book = load_workbook(file_path, data_only=True, read_only=True)
     except Exception as exc:  # noqa: BLE001
         job.status = "failed"
         job.error_message = str(exc)
@@ -140,59 +170,62 @@ def import_meeting_xlsx(db, file_path: Path, default_year: int | None = None,
         db.commit()
         return {"status": "failed", "error": str(exc)}
 
-    for sheet_name, df in frames.items():
-        if df is None or df.empty:
-            continue
-        df = df.dropna(how="all")
-        columns = [str(c) for c in df.columns]
-        date_col = _find_col(columns, ["日期", "时间"])
-        content_col = _find_col(columns, ["内容", "记录", "事项", "工作"])
-        station_col = _find_col(columns, ["场站", "电站", "单位"])
-        # 兜底：第一列当日期，第二列当内容
-        if date_col is None and len(columns) >= 1:
-            date_col = columns[0]
-        if content_col is None and len(columns) >= 2:
-            content_col = columns[1]
-
-        for row_no, (_, row) in enumerate(df.iterrows(), start=2):
-            raw_content = row.get(content_col) if content_col else None
-            if raw_content is None or not str(raw_content).strip():
+    try:
+        for sheet in book.worksheets:
+            sheet_name = str(sheet.title)
+            columns, rows = _sheet_rows(sheet)
+            if not columns:
                 continue
-            raw_text = str(raw_content).strip()
-            date_raw = row.get(date_col) if date_col else None
-            source_date, is_unresolved = parse_date(date_raw, default_year)
-            if is_unresolved:
-                date_unresolved.append({"sheet": sheet_name, "row": row_no,
-                                        "date": str(date_raw)})
+            date_col = _find_col(columns, ["日期", "时间"])
+            content_col = _find_col(columns, ["内容", "记录", "事项", "工作"])
+            station_col = _find_col(columns, ["场站", "电站", "单位"])
+            # 兜底：第一列当日期，第二列当内容
+            if date_col is None and len(columns) >= 1:
+                date_col = columns[0]
+            if content_col is None and len(columns) >= 2:
+                content_col = columns[1]
 
-            station_val = row.get(station_col) if station_col else None
-            station_id = (force_station_id
-                          or identify_station(db, station_col=station_val,
-                                              sheet_name=sheet_name, text=raw_text))
+            for row_no, row in rows:
+                raw_content = row.get(content_col) if content_col else None
+                if _is_blank(raw_content):
+                    continue
+                raw_text = str(raw_content).strip()
+                date_raw = row.get(date_col) if date_col else None
+                source_date, is_unresolved = parse_date(date_raw, default_year)
+                if is_unresolved:
+                    date_unresolved.append({"sheet": sheet_name, "row": row_no,
+                                            "date": str(date_raw)})
 
-            normalized = normalize_text(raw_text)
-            chash = _content_hash(source_date, station_id, normalized)
-            exists = (db.query(SourceRecord.id)
-                      .filter(SourceRecord.content_hash == chash).first())
-            if exists:
-                skipped += 1
-                continue
+                station_val = row.get(station_col) if station_col else None
+                station_id = (force_station_id
+                              or identify_station(db, station_col=station_val,
+                                                  sheet_name=sheet_name, text=raw_text))
 
-            db.add(SourceRecord(
-                import_job_id=job.id,
-                source_type="tencent_xlsx",
-                source_date=source_date,
-                station_id=station_id,
-                sheet_name=str(sheet_name),
-                row_no=row_no,
-                raw_text=raw_text,
-                normalized_text=normalized,
-                raw_json=json.dumps(
-                    {str(k): (None if pd.isna(v) else str(v))
-                     for k, v in row.items()}, ensure_ascii=False),
-                content_hash=chash,
-            ))
-            inserted += 1
+                normalized = normalize_text(raw_text)
+                chash = _content_hash(source_date, station_id, normalized)
+                exists = (db.query(SourceRecord.id)
+                          .filter(SourceRecord.content_hash == chash).first())
+                if exists:
+                    skipped += 1
+                    continue
+
+                db.add(SourceRecord(
+                    import_job_id=job.id,
+                    source_type="tencent_xlsx",
+                    source_date=source_date,
+                    station_id=station_id,
+                    sheet_name=sheet_name,
+                    row_no=row_no,
+                    raw_text=raw_text,
+                    normalized_text=normalized,
+                    raw_json=json.dumps(
+                        {str(key): (None if _is_blank(value) else str(value))
+                         for key, value in row.items()}, ensure_ascii=False),
+                    content_hash=chash,
+                ))
+                inserted += 1
+    finally:
+        book.close()
 
     job.status = "success"
     job.row_count = inserted
@@ -224,8 +257,7 @@ def import_monthly_plan_xlsx(db, file_path: Path, plan_month: str,
 
     inserted, skipped, date_unresolved = 0, 0, []
     try:
-        frames = pd.read_excel(file_path, sheet_name=None, engine="openpyxl",
-                               dtype=str)
+        book = load_workbook(file_path, data_only=True, read_only=True)
     except Exception as exc:  # noqa: BLE001
         job.status = "failed"
         job.error_message = str(exc)
@@ -243,57 +275,63 @@ def import_monthly_plan_xlsx(db, file_path: Path, plan_month: str,
             MonthlyPlanItem.plan_month == plan_month).all()
     }
 
-    for sheet_name, df in frames.items():
-        if df is None or df.empty:
-            continue
-        cat = "quarterly" if "季度" in str(sheet_name) else category
-        df = df.dropna(how="all")
-        columns = [str(c) for c in df.columns]
-        title_col = _find_col(columns, ["工作内容", "内容", "事项", "工作"])
-        start_col = _find_col(columns, ["开始"])
-        end_col = _find_col(columns, ["结束", "截止", "完成时间"])
-        owner_col = _find_col(columns, ["完成人", "责任人", "负责人"])
-        status_col = _find_col(columns, ["完成情况", "状态"])
-        note_col = _find_col(columns, ["备注"])
-        if title_col is None:
-            title_col = columns[0]
+    try:
+        for sheet in book.worksheets:
+            sheet_name = str(sheet.title)
+            columns, rows = _sheet_rows(sheet)
+            if not columns:
+                continue
+            cat = "quarterly" if "季度" in sheet_name else category
+            title_col = _find_col(columns, ["工作内容", "内容", "事项", "工作"])
+            start_col = _find_col(columns, ["开始"])
+            end_col = _find_col(columns, ["结束", "截止", "完成时间"])
+            owner_col = _find_col(columns, ["完成人", "责任人", "负责人"])
+            status_col = _find_col(columns, ["完成情况", "状态"])
+            note_col = _find_col(columns, ["备注"])
+            if title_col is None:
+                title_col = columns[0]
 
-        for row_index, (_, row) in enumerate(df.iterrows(), start=2):
-            title = row.get(title_col)
-            if title is None or not str(title).strip():
-                continue
-            start_raw = row.get(start_col) if start_col else None
-            end_raw = row.get(end_col) if end_col else None
-            plan_start, start_unresolved = parse_date(start_raw, default_year)
-            plan_end, end_unresolved = parse_date(end_raw, default_year)
-            if start_unresolved or end_unresolved:
-                date_unresolved.append({
-                    "sheet": sheet_name,
-                    "row": row_index,
-                    "date": str(start_raw if start_unresolved else end_raw),
-                })
-            status_raw = str(row.get(status_col)).strip() if status_col and row.get(status_col) is not None else ""
-            status = "completed" if "已完成" in status_raw or status_raw == "完成" else "pending"
-            title_text = str(title).strip()
-            item_key = (station_id, cat, normalize_text(title_text),
-                        plan_start or "", plan_end or "")
-            if item_key in existing_keys:
-                skipped += 1
-                continue
-            db.add(MonthlyPlanItem(
-                plan_month=plan_month,
-                scope_type="station" if station_id else "region",
-                station_id=station_id,
-                title=title_text,
-                category=cat,
-                plan_start=plan_start,
-                plan_end=plan_end,
-                owner=str(row.get(owner_col)).strip() if owner_col and row.get(owner_col) is not None else "",
-                status=status,
-                notes=str(row.get(note_col)).strip() if note_col and row.get(note_col) is not None else "",
-            ))
-            existing_keys.add(item_key)
-            inserted += 1
+            for row_index, row in rows:
+                title = row.get(title_col)
+                if _is_blank(title):
+                    continue
+                start_raw = row.get(start_col) if start_col else None
+                end_raw = row.get(end_col) if end_col else None
+                plan_start, start_unresolved = parse_date(start_raw, default_year)
+                plan_end, end_unresolved = parse_date(end_raw, default_year)
+                if start_unresolved or end_unresolved:
+                    date_unresolved.append({
+                        "sheet": sheet_name,
+                        "row": row_index,
+                        "date": str(start_raw if start_unresolved else end_raw),
+                    })
+                status_value = row.get(status_col) if status_col else None
+                status_raw = "" if _is_blank(status_value) else str(status_value).strip()
+                status = "completed" if "已完成" in status_raw or status_raw == "完成" else "pending"
+                title_text = str(title).strip()
+                item_key = (station_id, cat, normalize_text(title_text),
+                            plan_start or "", plan_end or "")
+                if item_key in existing_keys:
+                    skipped += 1
+                    continue
+                owner_value = row.get(owner_col) if owner_col else None
+                note_value = row.get(note_col) if note_col else None
+                db.add(MonthlyPlanItem(
+                    plan_month=plan_month,
+                    scope_type="station" if station_id else "region",
+                    station_id=station_id,
+                    title=title_text,
+                    category=cat,
+                    plan_start=plan_start,
+                    plan_end=plan_end,
+                    owner="" if _is_blank(owner_value) else str(owner_value).strip(),
+                    status=status,
+                    notes="" if _is_blank(note_value) else str(note_value).strip(),
+                ))
+                existing_keys.add(item_key)
+                inserted += 1
+    finally:
+        book.close()
 
     job.status = "success"
     job.row_count = inserted

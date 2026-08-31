@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
-"""验收检查脚本：读取生成的 Word，打印结构与着色。"""
+"""验收检查脚本：读取命令行传入的 Word，打印结构与着色。"""
 import sys
 import io
+from pathlib import Path
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
 from docx import Document
 from docx.oxml.ns import qn
 
-p = (r"C:\Users\zzzaa\Desktop\交接班工作\jx-handover\runtime\generated"
-     r"\XS_MMS\202608\当前版\修水眉毛山风电场交接班记录_20260814-20260823.docx")
+p = Path(sys.argv[1]).expanduser().resolve() if len(sys.argv) > 1 else None
+if p is None or not p.is_file():
+    raise SystemExit("用法：python check_docx.py <待检查的.docx>")
 doc = Document(p)
 for para in doc.paragraphs:
     if para.text.strip():

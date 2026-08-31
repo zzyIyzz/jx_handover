@@ -451,6 +451,11 @@ class V030WorkflowTest(unittest.TestCase):
             red = doc.tables[2].rows[1].cells[0]._tc.get_or_add_tcPr().find(qn("w:shd"))
             self.assertEqual(yellow.get(qn("w:fill")), "FFFE83")
             self.assertEqual(red.get(qn("w:fill")), "FFA5A5")
+            for table in doc.tables[1:]:
+                for row in table.rows:
+                    self.assertIsNotNone(
+                        row._tr.get_or_add_trPr().find(qn("w:cantSplit"))
+                    )
 
 
 if __name__ == "__main__":

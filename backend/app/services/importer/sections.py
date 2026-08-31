@@ -29,6 +29,7 @@ from app.models import (
     new_id,
     now_iso,
 )
+from app.services.ai.adapter import get_ai
 
 
 STANDARD_SHEETS = {
@@ -383,6 +384,101 @@ def _detect_adapter(book) -> str:
     })
 
 
+def _apply_ai_suggestions(
+    rows: list[dict],
+    *,
+    batch: HandoverBatch,
+    station: Station,
+) -> dict:
+    """Enrich only the editable preview fields and preserve provenance/dates."""
+    if config.AI_MODE != "qwen":
+        return {"status": "disabled", "model": "mock", "usage": {}, "applied": 0}
+    if not config.QWEN_API_KEY:
+        return {
+            "status": "not_configured",
+            "model": config.QWEN_MODEL,
+            "usage": {},
+            "applied": 0,
+            "error": "尚未在服务器填写 Qwen API Key。",
+        }
+
+    ai = get_ai()
+    result = ai.enrich_preview_rows(rows, {
+        "station": station.name,
+        "batch_start": batch.start_date,
+        "batch_end": batch.end_date,
+        "handover_date": batch.handover_date,
+    })
+    if result.get("error"):
+        return {
+            "status": "fallback",
+            "model": result.get("model") or config.QWEN_MODEL,
+            "usage": result.get("usage") or {},
+            "applied": 0,
+            "error": str(result.get("error")),
+        }
+
+    by_key = {
+        row.get("preview_key"): row
+        for row in rows
+        if row.get("preview_key")
+    }
+    # People and dates are deterministic source facts and are never accepted
+    # back from the model. AI may organize wording/classification in preview;
+    # the user still makes the final decision before commit.
+    editable_text_fields = {
+        "title_snapshot", "summary", "latest_progress", "blocker", "next_action",
+    }
+    applied = 0
+    applied_keys: set[str] = set()
+    for suggestion in result.get("items") or []:
+        if not isinstance(suggestion, dict):
+            continue
+        preview_key = suggestion.get("preview_key")
+        row = by_key.get(preview_key)
+        if (row is None or row.get("kind") != "item"
+                or preview_key in applied_keys):
+            continue
+        if suggestion.get("section") in {"important", "handover"}:
+            row["section"] = suggestion["section"]
+        if suggestion.get("status") in ITEM_STATUSES:
+            row["status"] = suggestion["status"]
+        if suggestion.get("priority") in PRIORITIES:
+            row["priority"] = suggestion["priority"]
+        for field in editable_text_fields:
+            value = suggestion.get(field)
+            if isinstance(value, str):
+                clean_value = value.strip()[:2000]
+                if field != "title_snapshot" or clean_value:
+                    row[field] = clean_value
+        row["ai_enriched"] = True
+        try:
+            confidence = float(suggestion.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        row["ai_confidence"] = max(0.0, min(1.0, confidence))
+        warning_values = suggestion.get("warnings")
+        if not isinstance(warning_values, list):
+            warning_values = []
+        ai_warnings = [
+            _clean(value)[:500]
+            for value in warning_values
+            if _clean(value)
+        ]
+        row["warnings"].extend(ai_warnings)
+        row["warnings"].append(
+            f"AI已整理（置信度 {row['ai_confidence']:.0%}），请人工确认"
+        )
+        applied_keys.add(preview_key)
+        applied += 1
+    return {
+        "status": "success",
+        "model": result.get("model") or config.QWEN_MODEL,
+        "usage": result.get("usage") or {},
+        "applied": applied,
+    }
+
+
 def _mark_duplicates(db, meta_id: str, rows: list[dict]) -> None:
     existing_items = (db.query(HandoverItem)
                       .filter(HandoverItem.station_meta_id == meta_id).all())
@@ -438,8 +534,29 @@ def create_preview(db, batch_id: str, meta_id: str, source_path: Path) -> dict:
     parser_key = _detect_adapter(book)
     if parser_key == "standard_template":
         rows, warnings = _parse_standard(book, batch)
+        ai_result = {
+            "status": "not_needed",
+            "model": config.QWEN_MODEL,
+            "usage": {},
+            "applied": 0,
+        }
     else:
         rows, warnings = _parse_work_log(book, batch, station)
+        ai_result = _apply_ai_suggestions(
+            rows, batch=batch, station=station
+        )
+        if ai_result["status"] == "not_configured":
+            warnings.append({
+                "sheet": "Sheet1",
+                "field": "AI",
+                "reason": "Qwen尚未配置，已使用确定性规则生成预览。",
+            })
+        elif ai_result["status"] == "fallback":
+            warnings.append({
+                "sheet": "Sheet1",
+                "field": "AI",
+                "reason": "Qwen调用失败，已自动回退到确定性规则；正式数据未受影响。",
+            })
     _mark_duplicates(db, meta_id, rows)
 
     job = ImportJob(
@@ -463,6 +580,13 @@ def create_preview(db, batch_id: str, meta_id: str, source_path: Path) -> dict:
         source_sha256=source_hash,
         normalized_json=json.dumps(rows, ensure_ascii=False, default=str),
         warnings_json=json.dumps(warnings, ensure_ascii=False, default=str),
+        ai_status=ai_result["status"],
+        ai_model=ai_result.get("model") or "",
+        ai_usage_json=json.dumps({
+            "usage": ai_result.get("usage") or {},
+            "applied": ai_result.get("applied", 0),
+            "error": ai_result.get("error", ""),
+        }, ensure_ascii=False),
     )
     db.add(preview)
     db.commit()
@@ -479,6 +603,11 @@ def _preview_response(preview: SectionImportPreview) -> dict:
         "source_file_name": preview.source_file_name,
         "source_sha256": preview.source_sha256,
         "status": preview.status,
+        "ai": {
+            "status": preview.ai_status,
+            "model": preview.ai_model,
+            **json.loads(preview.ai_usage_json or "{}"),
+        },
         "rows": rows,
         "warnings": json.loads(preview.warnings_json or "[]"),
         "summary": {

@@ -9,10 +9,15 @@ from sqlalchemy.orm import Session
 from app import config
 from app.db import get_db
 from app.models import Station
+from app.security import require_identity
 from app.services.importer import sections as section_importer
 from app.services.importer import xlsx as xlsx_importer
 
-router = APIRouter(prefix="/api", tags=["imports"])
+router = APIRouter(
+    prefix="/api",
+    tags=["imports"],
+    dependencies=[Depends(require_identity)],
+)
 
 MAX_XLSX_BYTES = 50 * 1024 * 1024
 
@@ -26,13 +31,24 @@ async def _save_upload(file: UploadFile, directory: str) -> Path:
     original_name = (file.filename or "upload.xlsx").replace("/", "_").replace("\\", "_")
     if Path(original_name).suffix.lower() != ".xlsx":
         raise HTTPException(422, "仅支持 .xlsx 文件，请先从腾讯文档或 Excel 导出为 XLSX。")
-    payload = await file.read()
-    if not payload:
-        raise HTTPException(422, "上传文件为空，请重新选择。")
-    if len(payload) > MAX_XLSX_BYTES:
-        raise HTTPException(413, "文件超过 50 MB，请精简后重试。")
     target = Path(directory) / original_name
-    target.write_bytes(payload)
+    size = 0
+    try:
+        with target.open("wb") as output:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_XLSX_BYTES:
+                    raise HTTPException(413, "文件超过 50 MB，请精简后重试。")
+                output.write(chunk)
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise
+    if size == 0:
+        target.unlink(missing_ok=True)
+        raise HTTPException(422, "上传文件为空，请重新选择。")
     return target
 
 
@@ -86,7 +102,7 @@ def download_handover_template():
         raise HTTPException(503, "标准导入模板尚未安装，请重新安装完整发布包。")
     return FileResponse(
         config.STANDARD_IMPORT_TEMPLATE,
-        filename="交接班系统标准导入模板_V0.3.0.xlsx",
+        filename="交接班系统标准导入模板.xlsx",
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 

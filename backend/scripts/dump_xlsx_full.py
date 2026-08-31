@@ -1,14 +1,16 @@
 # -*- coding: utf-8 -*-
-"""全量转储定期工作计划 xlsx：所有 sheet、所有行、所有列（含合并单元格展开）。"""
+"""全量转储传入 XLSX：所有 sheet、所有行、所有列（含合并单元格展开）。"""
 import os
+from pathlib import Path
+import sys
 from openpyxl import load_workbook
 
-SRC = (r"c:\Users\zzzaa\Documents\xwechat_files\wxid_g07jr3np4ghb22_6a3b"
-       r"\temp\RWTemp\2026-08\9e20f478899dc29eb19741386f9343c8"
-       r"\副本-检修片区定期工作计划（1008）.xlsx")
 OUT = os.path.join(os.environ.get("TEMP", "."), "xlsx_full_dump.txt")
 
-wb = load_workbook(SRC, data_only=True)
+source = Path(sys.argv[1]).expanduser().resolve() if len(sys.argv) > 1 else None
+if source is None or not source.is_file():
+    raise SystemExit("用法：python dump_xlsx_full.py <待检查的.xlsx>")
+wb = load_workbook(source, data_only=True)
 lines = [f"sheets: {wb.sheetnames}"]
 for ws in wb.worksheets:
     lines.append(f"\n########## SHEET: {ws.title} "

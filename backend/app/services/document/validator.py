@@ -169,6 +169,15 @@ def validate_docx(path: Path, expected: dict[str, int] | None = None) -> dict:
             header_properties = doc.tables[index].rows[0]._tr.get_or_add_trPr()
             if header_properties.find(qn("w:tblHeader")) is None:
                 warnings.append(f"第 {index + 1} 张表未设置跨页重复表头")
+            split_rows = [
+                row_number
+                for row_number, row in enumerate(doc.tables[index].rows)
+                if row._tr.get_or_add_trPr().find(qn("w:cantSplit")) is None
+            ]
+            if split_rows:
+                errors.append(
+                    f"第 {index + 1} 张表存在可跨页拆分行：{split_rows}"
+                )
 
         if expected is not None:
             for table_index, key in enumerate(EXPECTED_KEYS, start=1):

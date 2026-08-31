@@ -4,7 +4,7 @@
       <header class="page-hero">
         <div>
           <el-button link class="back-button" @click="router.push('/')">← 返回工作台</el-button>
-          <span class="eyebrow">V0.3.0 · 完整六章</span>
+          <span class="eyebrow">V0.4.0 · 局域网多人协作</span>
           <h1>{{ currentStation.station_name }}交接班记录</h1>
           <p>{{ cnDate(batch.start_date) }} — {{ cnDate(batch.end_date) }} 班次 · 交接日 {{ cnDate(batch.handover_date) }}</p>
         </div>
@@ -276,8 +276,20 @@
         <template v-else>
           <div class="preview-summary">
             <span>解析器：{{ importPreview.parser_key === 'work_log' ? '实际工作日志' : '标准模板' }}</span>
+            <span v-if="importPreview.ai.status === 'success'" class="ai-ok">AI：{{ importPreview.ai.model }} 已整理 {{ importPreview.ai.applied || 0 }} 条</span>
+            <span v-else-if="importPreview.ai.status === 'fallback'" class="ai-fallback">AI 调用失败，已自动回退</span>
+            <span v-else-if="importPreview.ai.status === 'not_configured'">AI 尚未配置，当前使用本地规则</span>
+            <span v-else-if="importPreview.ai.status === 'not_needed'">标准模板无需 AI，已按确定性规则解析</span>
             <span>共 {{ importPreview.summary.total }} 条</span><span>第三章 {{ importCount('important') }}</span><span>第四章 {{ importCount('handover') }}</span><span>第五章 {{ importCount('external') }}</span>
           </div>
+          <el-alert
+            :title="previewAiTitle(importPreview.ai.status)"
+            :description="previewAiDescription(importPreview.ai)"
+            :type="previewAiType(importPreview.ai.status)"
+            :closable="false"
+            show-icon
+            class="preview-ai-alert"
+          />
           <el-alert v-for="warning in importPreview.warnings" :key="`${warning.sheet}-${warning.field}-${warning.reason}`" :title="`${warning.sheet} · ${warning.reason}`" type="warning" :closable="false" show-icon class="preview-warning" />
           <el-tabs v-model="previewTab">
             <el-tab-pane label="三、重点工作" name="important" />
@@ -287,7 +299,7 @@
           <el-table :data="previewRows" row-key="preview_key" max-height="52vh" class="preview-table">
             <el-table-column label="导入" width="72" align="center"><template #default="{ row }"><el-checkbox v-model="row.include" :disabled="!row.valid" /></template></el-table-column>
             <el-table-column label="来源" width="105"><template #default="{ row }">{{ row.source.sheet }}<br>第 {{ row.source.row_no }} 行</template></el-table-column>
-            <el-table-column :label="previewTab === 'external' ? '外委单位 / 工作内容' : '工作内容'" min-width="330"><template #default="{ row }"><template v-if="row.kind === 'external'"><b>{{ row.contractor || '未填外委单位' }}</b><p>{{ row.work_content }}</p></template><template v-else><b>{{ row.title_snapshot }}</b><p>{{ ITEM_STATUS_LABEL[row.status || 'unknown'] }} · {{ PRIORITY_LABEL[row.priority || 'normal'] }}</p></template></template></el-table-column>
+            <el-table-column :label="previewTab === 'external' ? '外委单位 / 工作内容' : '工作内容'" min-width="330"><template #default="{ row }"><template v-if="row.kind === 'external'"><b>{{ row.contractor || '未填外委单位' }}</b><p>{{ row.work_content }}</p></template><template v-else><b>{{ row.title_snapshot }}</b><p>{{ ITEM_STATUS_LABEL[row.status || 'unknown'] }} · {{ PRIORITY_LABEL[row.priority || 'normal'] }} <el-tag v-if="row.ai_enriched" size="small" type="success" effect="plain">AI {{ Math.round((row.ai_confidence || 0) * 100) }}%</el-tag></p></template></template></el-table-column>
             <el-table-column label="提示" min-width="270"><template #default="{ row }"><el-tag v-if="row.duplicate" type="warning">重复，默认跳过</el-tag><div v-for="message in [...row.errors, ...row.warnings]" :key="message" class="row-warning">{{ message }}</div></template></el-table-column>
             <el-table-column label="操作" width="105" fixed="right" align="center"><template #default="{ row }"><el-button link type="primary" @click="openPreviewRow(row)">检查并编辑</el-button></template></el-table-column>
           </el-table>
@@ -316,7 +328,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineComponent, h, onMounted, reactive, ref, watch } from 'vue'
+import { computed, defineComponent, h, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, ElOption, ElSelect } from 'element-plus'
 import {
@@ -348,6 +360,8 @@ const activeMetaId = ref('')
 const staffList = ref<Staff[]>([])
 const metaSaving = ref(false)
 let metaTimer: ReturnType<typeof setTimeout> | null = null
+let metaSaveSequence = 0
+let metaRequestInFlight = false
 
 const itemSections = [
   { key: 'important' as const, anchor: 'chapter-3', number: '三', title: '重点工作完成情况', description: '本班已完成事项建议放这里；紧急红、重点黄、普通白，颜色与章节互不绑定。', empty: '本班无紧急/重点工作' },
@@ -376,19 +390,63 @@ watch(activeMetaId, loadStaff)
 
 function queueMetaSave() {
   if (metaTimer) clearTimeout(metaTimer)
+  const metaId = currentStation.value?.station_meta_id
+  if (!metaId) return
+  const sequence = ++metaSaveSequence
   metaSaving.value = true
-  metaTimer = setTimeout(saveMeta, 350)
+  metaTimer = setTimeout(() => saveMeta(metaId, sequence), 350)
 }
-async function saveMeta() {
-  if (!currentStation.value) return
+async function saveMeta(metaId: string, sequence: number) {
+  // Serialize this browser's autosaves. Without this guard, a second edit made
+  // while the first request is in flight can reuse the old revision and look
+  // like a conflict with another user.
+  if (metaRequestInFlight) {
+    metaTimer = setTimeout(() => saveMeta(metaId, sequence), 100)
+    return
+  }
+  const station = batch.value?.stations.find(row => row.station_meta_id === metaId)
+  if (!station) return
+  metaRequestInFlight = true
+  let conflicted = false
   try {
-    await api.patchMeta(currentStation.value.station_meta_id, {
-      duty_leader: currentStation.value.duty_leader,
-      temp_leader: currentStation.value.temp_leader || '无',
-      operators: currentStation.value.operators
+    const result = await api.patchMeta(station.station_meta_id, station.revision, {
+      duty_leader: station.duty_leader,
+      temp_leader: station.temp_leader || '无',
+      operators: station.operators
     })
-  } catch (error) { ElMessage.error(friendlyError(error, '基本信息保存失败')) }
-  finally { metaSaving.value = false }
+    station.revision = result.revision
+  } catch (error) {
+    if ((error as any)?.response?.status === 409) {
+      conflicted = true
+      metaSaveSequence += 1
+      if (metaTimer) clearTimeout(metaTimer)
+      await ElMessageBox.alert(
+        '其他同事刚刚修改了这份基本信息。系统将重新读取服务器上的最新内容，避免覆盖对方的修改；请核对后再填写一次。',
+        '检测到多人编辑冲突',
+        {
+          type: 'warning', confirmButtonText: '读取最新内容', showClose: false,
+          closeOnClickModal: false, closeOnPressEscape: false
+        }
+      )
+      await load()
+    } else {
+      ElMessage.error(friendlyError(error, '基本信息保存失败'))
+    }
+  }
+  finally {
+    metaRequestInFlight = false
+    if (conflicted) {
+      metaSaving.value = false
+    } else if (sequence !== metaSaveSequence) {
+      const latestId = currentStation.value?.station_meta_id
+      if (latestId) {
+        const latestSequence = metaSaveSequence
+        metaTimer = setTimeout(() => saveMeta(latestId, latestSequence), 50)
+      }
+    } else {
+      metaSaving.value = false
+    }
+  }
 }
 
 const newDevice = ref('')
@@ -554,6 +612,26 @@ async function parseImport() {
   finally { parsingImport.value = false }
 }
 function importCount(section: 'important' | 'handover' | 'external') { return (importPreview.value?.rows || []).filter(row => section === 'external' ? row.kind === 'external' : row.kind === 'item' && row.section === section).length }
+function previewAiType(status: string): 'success' | 'warning' | 'info' | 'error' {
+  if (status === 'success') return 'success'
+  if (status === 'fallback' || status === 'not_configured') return 'warning'
+  if (status === 'not_needed') return 'info'
+  return 'error'
+}
+function previewAiTitle(status: string) {
+  if (status === 'success') return 'Qwen 智能整理成功，请继续人工确认'
+  if (status === 'fallback') return 'Qwen 调用失败，已自动改用本地规则，仍可继续导入'
+  if (status === 'not_configured') return '服务器尚未配置 Qwen API Key，当前使用本地规则'
+  if (status === 'not_needed') return '标准模板已按固定字段解析，无需调用 AI'
+  return 'AI 状态异常，预览数据仍保留；请人工检查后继续'
+}
+function previewAiDescription(ai: ImportPreview['ai']) {
+  if (ai.status === 'success') return `${ai.model || 'Qwen'} 只整理了当前班次预览中的候选事项，共应用 ${ai.applied || 0} 条建议；人工修改始终优先。`
+  if (ai.status === 'fallback') return `本次未采用 AI 建议，确定性解析结果没有丢失。${ai.error ? `错误摘要：${ai.error}` : ''}`
+  if (ai.status === 'not_configured') return '无需等待管理员配置，先检查本地规则生成的章节、状态、日期和责任人即可。'
+  if (ai.status === 'not_needed') return '文件字段与标准模板一致，系统没有向模型发送数据。'
+  return '系统不会因为 AI 异常阻断导入；无效行仍会单独标出，其他有效行可以提交。'
+}
 function openPreviewRow(row: ImportPreviewRow) { previewEditing.value = row; previewRowDialog.value = true }
 function finishPreviewEdit() {
   const row = previewEditing.value
@@ -587,7 +665,16 @@ function friendlyError(error: unknown, fallback: string) {
   return value?.message || fallback
 }
 
-onMounted(load)
+function refreshAfterReconnect() { load() }
+
+onMounted(() => {
+  window.addEventListener('jx-data-refresh', refreshAfterReconnect)
+  load()
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('jx-data-refresh', refreshAfterReconnect)
+  if (metaTimer) clearTimeout(metaTimer)
+})
 </script>
 
 <style scoped>
@@ -652,6 +739,9 @@ onMounted(load)
 .dialog-center { text-align: center; }
 .preview-summary { margin-bottom: 12px; display: flex; flex-wrap: wrap; gap: 8px; }
 .preview-summary span { padding: 6px 10px; color: #47627e; border-radius: 999px; background: #edf4fb; font-size: 12px; }
+.preview-summary .ai-ok { color: #17623a; background: #e7f7ee; }
+.preview-summary .ai-fallback { color: #9a5a0a; background: #fff4dc; }
+.preview-ai-alert { margin-bottom: 10px; }
 .preview-warning { margin-bottom: 8px; }
 .preview-table p { margin: 5px 0 0; color: #7a899a; font-size: 12px; }
 .row-warning { margin-top: 5px; color: #a36a14; font-size: 11px; line-height: 1.45; }

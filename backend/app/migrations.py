@@ -1,11 +1,11 @@
-"""SQLite schema migration and safety backup for v0.3.0.
+"""SQLite schema migration and safety backup through v0.4.0.
 
 The application deliberately keeps migration logic small and idempotent.  It
 never rewrites document snapshots; only missing columns/tables are added.
 """
 from __future__ import annotations
 
-import shutil
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 
@@ -46,18 +46,51 @@ def _needs_v030_migration(target_engine: Engine) -> bool:
     return not {"external_assessments", "section_import_previews"}.issubset(tables)
 
 
+def _needs_v040_migration(target_engine: Engine) -> bool:
+    inspector = inspect(target_engine)
+    tables = set(inspector.get_table_names())
+    if not tables:
+        return False
+    if "section_import_previews" in tables:
+        columns = {
+            column["name"]
+            for column in inspector.get_columns("section_import_previews")
+        }
+        if not {"ai_status", "ai_model", "ai_usage_json"}.issubset(columns):
+            return True
+    return "audit_events" not in tables
+
+
 def _backup_database(target_engine: Engine, backup_dir: Path) -> Path | None:
     database_path = _sqlite_path(target_engine)
     if database_path is None or not database_path.exists() or database_path.stat().st_size == 0:
         return None
     backup_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    target = backup_dir / f"handover_before_v0.3.0_{stamp}.db"
+    target = backup_dir / f"handover_before_migration_{stamp}.db"
     counter = 1
     while target.exists():
-        target = backup_dir / f"handover_before_v0.3.0_{stamp}_{counter}.db"
+        target = backup_dir / f"handover_before_migration_{stamp}_{counter}.db"
         counter += 1
-    shutil.copy2(database_path, target)
+    temporary = target.with_suffix(".db.tmp")
+    source_connection = sqlite3.connect(str(database_path), timeout=30)
+    target_connection = sqlite3.connect(str(temporary), timeout=30)
+    try:
+        # SQLite's online backup API includes committed WAL pages and produces
+        # one self-contained file even after an unclean previous shutdown.
+        source_connection.backup(target_connection)
+    finally:
+        target_connection.close()
+        source_connection.close()
+    check_connection = sqlite3.connect(str(temporary), timeout=30)
+    try:
+        check = check_connection.execute("PRAGMA quick_check").fetchone()
+    finally:
+        check_connection.close()
+    if not check or str(check[0]).lower() != "ok":
+        temporary.unlink(missing_ok=True)
+        raise RuntimeError("迁移前数据库备份完整性检查未通过。")
+    temporary.replace(target)
     return target
 
 
@@ -70,7 +103,8 @@ def migrate_database(
 
     backup = None
     changed: list[str] = []
-    if _needs_v030_migration(target_engine):
+    if (_needs_v030_migration(target_engine)
+            or _needs_v040_migration(target_engine)):
         backup = _backup_database(
             target_engine,
             backup_dir or (config.SNAPSHOT_DIR / "database_backups"),
@@ -138,6 +172,30 @@ def migrate_database(
                     "ADD COLUMN library_id TEXT NOT NULL DEFAULT ''"
                 ))
                 changed.append("monthly_plan_items.library_id")
+
+        if "section_import_previews" in tables:
+            columns = {
+                column["name"]
+                for column in inspector.get_columns("section_import_previews")
+            }
+            if "ai_status" not in columns:
+                connection.execute(text(
+                    "ALTER TABLE section_import_previews "
+                    "ADD COLUMN ai_status TEXT NOT NULL DEFAULT 'not_requested'"
+                ))
+                changed.append("section_import_previews.ai_status")
+            if "ai_model" not in columns:
+                connection.execute(text(
+                    "ALTER TABLE section_import_previews "
+                    "ADD COLUMN ai_model TEXT NOT NULL DEFAULT ''"
+                ))
+                changed.append("section_import_previews.ai_model")
+            if "ai_usage_json" not in columns:
+                connection.execute(text(
+                    "ALTER TABLE section_import_previews "
+                    "ADD COLUMN ai_usage_json TEXT NOT NULL DEFAULT '{}'"
+                ))
+                changed.append("section_import_previews.ai_usage_json")
 
     # SQLAlchemy creates only missing tables/indexes and leaves historical rows,
     # document snapshots and generated Word files untouched.

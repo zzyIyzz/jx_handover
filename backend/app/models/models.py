@@ -320,6 +320,9 @@ class SectionImportPreview(Base):
     source_sha256 = Column(Text, nullable=False)
     normalized_json = Column(Text, nullable=False, default="[]")
     warnings_json = Column(Text, nullable=False, default="[]")
+    ai_status = Column(Text, nullable=False, default="not_requested")
+    ai_model = Column(Text, nullable=False, default="")
+    ai_usage_json = Column(Text, nullable=False, default="{}")
     status = Column(Text, nullable=False, default="previewed")
     result_json = Column(Text, nullable=False, default="{}")
     created_at = Column(Text, nullable=False, default=now_iso)
@@ -339,6 +342,32 @@ class Staff(Base):
     role = Column(Text, nullable=False, default="现场值守")
     note = Column(Text, nullable=False, default="")
     is_active = Column(Integer, nullable=False, default=1)
+    created_at = Column(Text, nullable=False, default=now_iso)
+
+
+class AuditEvent(Base):
+    """Minimal server-side audit trail for multi-user access.
+
+    Request bodies and secrets are deliberately excluded. The trail answers
+    who changed which API resource and when without duplicating operational
+    content or ever recording the Qwen key/access code.
+    """
+
+    __tablename__ = "audit_events"
+    __table_args__ = (
+        Index("idx_audit_events_created", "created_at"),
+        Index("idx_audit_events_actor", "actor_name", "created_at"),
+    )
+
+    id = Column(Text, primary_key=True, default=lambda: new_id("audit"))
+    actor_name = Column(Text, nullable=False, default="")
+    actor_role = Column(Text, nullable=False, default="operator")
+    method = Column(Text, nullable=False)
+    request_path = Column(Text, nullable=False)
+    response_status = Column(Integer, nullable=False, default=0)
+    client_ip = Column(Text, nullable=False, default="")
+    user_agent = Column(Text, nullable=False, default="")
+    request_id = Column(Text, nullable=False, default="")
     created_at = Column(Text, nullable=False, default=now_iso)
 
 

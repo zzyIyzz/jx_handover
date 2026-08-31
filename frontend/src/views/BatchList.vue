@@ -247,7 +247,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { api, cnDate, cnDateTime, type BatchSummary, type ImportResult, type Station } from '@/api'
@@ -524,14 +524,22 @@ function friendlyError(error: any, fallback: string) {
   return error?.message || fallback
 }
 
-onMounted(async () => {
+async function loadPage() {
   try {
     stations.value = await api.stations()
   } catch {
     ElMessage.error('场站信息加载失败')
   }
   await load()
+}
+
+function refreshAfterReconnect() { loadPage() }
+
+onMounted(() => {
+  window.addEventListener('jx-data-refresh', refreshAfterReconnect)
+  loadPage()
 })
+onBeforeUnmount(() => window.removeEventListener('jx-data-refresh', refreshAfterReconnect))
 </script>
 
 <style scoped>

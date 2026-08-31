@@ -7,10 +7,15 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models import DocumentSnapshot, Staff, Station
+from app.security import require_identity
 from app.services import handover_service as hs, periodic
 from app.services.document import publish
 
-router = APIRouter(prefix="/api", tags=["handovers"])
+router = APIRouter(
+    prefix="/api",
+    tags=["handovers"],
+    dependencies=[Depends(require_identity)],
+)
 
 
 class CreateBatchReq(BaseModel):
@@ -45,6 +50,7 @@ class ApproveReq(BaseModel):
 
 
 class PatchMetaReq(BaseModel):
+    revision: int
     duty_leader: Optional[str] = None
     temp_leader: Optional[str] = None
     operators: Optional[list[str]] = None
@@ -203,8 +209,12 @@ def approve_all_items(batch_id: str, req: BulkApproveReq,
 
 @router.patch("/handover-station-meta/{meta_id}")
 def patch_meta(meta_id: str, req: PatchMetaReq, db: Session = Depends(get_db)):
-    fields = {k: v for k, v in req.model_dump().items() if v is not None}
-    return hs.patch_station_meta(db, meta_id, fields)
+    fields = {
+        k: v
+        for k, v in req.model_dump(exclude={"revision"}).items()
+        if v is not None
+    }
+    return hs.patch_station_meta(db, meta_id, req.revision, fields)
 
 
 @router.post("/handovers/{batch_id}/device-changes")

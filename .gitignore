@@ -23,9 +23,13 @@ runtime/data/
 runtime/generated/
 runtime/imports/
 runtime/snapshots/
+runtime-server/
 *.db
 *.sqlite
 *.sqlite3
+server-settings.json
+server-secrets.bin
+session_secret.key
 
 # --- 编辑器/系统 ---
 .vscode/
