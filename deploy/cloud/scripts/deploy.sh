@@ -38,13 +38,19 @@ fi
 docker compose config --quiet
 
 if command -v ss >/dev/null 2>&1 \
-    && ss -H -lnt 2>/dev/null | grep -Eq '(^|[[:space:]])[^[:space:]]*:1215[[:space:]]'; then
+    && ss -H -lnt 2>/dev/null | grep -Eq '(^|[[:space:]])[^[:space:]]*:8765[[:space:]]'; then
   running_app="$(docker compose ps --status running -q app 2>/dev/null || true)"
   if [[ -z "${running_app}" ]]; then
-    echo "ECS 本机 1215 端口已被其他程序占用；未启动容器，也不会结束占用进程。" >&2
-    echo "请执行 ss -lntp | grep 1215 查看占用程序。" >&2
+    echo "ECS 本机内部端口 8765 已被其他程序占用；未启动容器，也不会结束占用进程。" >&2
+    echo "请执行 ss -lntp | grep 8765 查看占用程序。" >&2
     exit 1
   fi
+fi
+
+if command -v ss >/dev/null 2>&1 \
+    && ss -H -lnt 2>/dev/null | grep -Eq '(^|[[:space:]])[^[:space:]]*:1215[[:space:]]'; then
+  echo "提示：公网端口 1215 已被占用；该端口预留给宝塔 Nginx HTTPS 反向代理。" >&2
+  echo "若占用程序不是 Nginx，请先释放 1215；脚本只提示，不会结束占用进程。" >&2
 fi
 
 docker compose build --pull
@@ -61,7 +67,7 @@ if [[ -z "${public_host}" || "${public_host}" == "${public_url}" ]]; then
   echo "无法从 JX_PUBLIC_URL 取得健康检查域名；请填写完整 HTTPS 地址。" >&2
   exit 1
 fi
-health_url="http://127.0.0.1:1215/api/health"
+health_url="http://127.0.0.1:8765/api/health"
 for _attempt in {1..60}; do
   if curl --fail --silent --show-error --max-time 5 \
       --header "Host: ${public_host}" "${health_url}" >/dev/null; then

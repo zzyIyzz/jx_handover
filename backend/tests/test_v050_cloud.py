@@ -31,7 +31,7 @@ class CloudProcessProbe(unittest.TestCase):
             "PYTHONPATH": str(BACKEND_ROOT),
             "JX_HANDOVER_MODE": "cloud",
             "JX_HANDOVER_DATA_DIR": data_root,
-            "JX_PUBLIC_URL": "https://handover.example.test",
+            "JX_PUBLIC_URL": "https://handover.example.test:1215",
             "JX_TRUSTED_HOSTS": "handover.example.test,127.0.0.1,localhost",
             "JX_CLOUD_ACCESS_SCOPE": "private",
             "JX_AUTH_REQUIRED": "1",
@@ -65,7 +65,7 @@ config.validate_runtime_configuration()
 from app.main import app
 from app.db import SessionLocal
 from app.models import Staff
-with TestClient(app, base_url="https://handover.example.test") as client:
+with TestClient(app, base_url="https://handover.example.test:1215") as client:
     db = SessionLocal()
     if db.query(Staff).filter(Staff.name == "测试管理员").first() is None:
         db.add(Staff(station_code="TEST", name="测试管理员", role="测试角色", note=""))
@@ -74,12 +74,12 @@ with TestClient(app, base_url="https://handover.example.test") as client:
     health = client.get("/api/health")
     foreign = client.post(
         "/api/session/login",
-        headers={"Origin": "https://lookalike.example.test"},
+        headers={"Origin": "https://lookalike.example.test:1215"},
         json={"name": "测试管理员", "access_code": "cloud-test-code-2026"},
     )
     login = client.post(
         "/api/session/login",
-        headers={"Origin": "https://handover.example.test"},
+        headers={"Origin": "https://handover.example.test:1215"},
         json={"name": "测试管理员", "access_code": "cloud-test-code-2026"},
     )
     protected = client.get("/api/handovers")
@@ -107,13 +107,14 @@ with TestClient(app, base_url="https://handover.example.test") as client:
 
         self.assertEqual(result["mode"], "cloud")
         self.assertEqual(result["host"], "0.0.0.0")
-        self.assertEqual(result["public_url"], "https://handover.example.test")
+        self.assertEqual(result["public_url"], "https://handover.example.test:1215")
         self.assertTrue(result["cookie_secure"])
         self.assertEqual(result["health_status"], 200)
         self.assertEqual(result["health"]["status"], "ok")
         self.assertEqual(result["health"]["version"], "0.5.0")
         self.assertEqual(result["health"]["mode"], "cloud")
-        self.assertEqual(result["health"]["port"], 1215)
+        self.assertEqual(result["health"]["port"], 8765)
+        self.assertEqual(result["health"]["public_port"], 1215)
         self.assertNotIn("data_root", result["health"])
         self.assertNotIn("public_url", result["health"])
         self.assertIn("max-age=31536000", result["hsts"])
@@ -141,7 +142,7 @@ else:
         with tempfile.TemporaryDirectory() as tmp:
             env = self._environment(tmp)
             env.update({
-                "JX_PUBLIC_URL": "http://handover.example.test/path",
+                "JX_PUBLIC_URL": "http://handover.example.test:1215/path",
                 "JX_TRUSTED_HOSTS": "*",
                 "JX_CLOUD_ACCESS_SCOPE": "public",
                 "JX_AUTH_REQUIRED": "0",
@@ -177,7 +178,7 @@ else:
         with tempfile.TemporaryDirectory() as tmp:
             env = self._environment(tmp)
             env.update({
-                "JX_PUBLIC_URL": "https://handover.example.com",
+                "JX_PUBLIC_URL": "https://handover.example.com:1215",
                 "JX_TRUSTED_HOSTS": "handover.example.com,127.0.0.1,localhost",
                 "JX_ACCESS_CODE": "请替换为至少12位的随机访问口令",
                 "JX_SESSION_SECRET": "请替换" * 16,
@@ -204,11 +205,15 @@ else:
             for address in ("203.0.113.20", "192.168.14.52"):
                 env = self._environment(tmp)
                 env.update({
-                    "JX_PUBLIC_URL": f"https://{address}",
+                    "JX_PUBLIC_URL": f"https://{address}:1215",
                     "JX_TRUSTED_HOSTS": f"{address},127.0.0.1,localhost",
                 })
                 error = self._run(script, env)["error"]
                 self.assertIn("真实公网 IPv4", error)
+            env = self._environment(tmp)
+            env["JX_PUBLIC_URL"] = "https://handover.example.test"
+            error = self._run(script, env)["error"]
+            self.assertIn("显式包含公网 HTTPS 端口 :1215", error)
 
 
 class CloudSecurityUnitTest(unittest.TestCase):
@@ -274,9 +279,9 @@ class CloudSecurityUnitTest(unittest.TestCase):
         entrypoint = (
             PROJECT_ROOT / "deploy" / "cloud" / "docker-entrypoint.sh"
         ).read_text(encoding="utf-8")
-        self.assertIn('"127.0.0.1:1215:1215"', compose)
-        self.assertNotIn('"1215:1215"', compose)
-        self.assertNotIn("8765", compose)
+        self.assertIn('"127.0.0.1:8765:8765"', compose)
+        self.assertNotIn('"8765:8765"', compose)
+        self.assertNotIn("127.0.0.1:1215", compose)
         self.assertIn("read_only: true", compose)
         self.assertIn("no-new-privileges:true", compose)
         self.assertIn("USER 10001:10001", dockerfile)
@@ -295,8 +300,9 @@ class CloudSecurityUnitTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("正式数据目录不存在", deploy_script)
         self.assertIn("prepare-host.sh", deploy_script)
-        self.assertIn("1215 端口已被其他程序占用", deploy_script)
-        self.assertIn("http://127.0.0.1:1215/api/health", deploy_script)
+        self.assertIn("内部端口 8765 已被其他程序占用", deploy_script)
+        self.assertIn("公网端口 1215 已被占用", deploy_script)
+        self.assertIn("http://127.0.0.1:8765/api/health", deploy_script)
 
         prepare_script = (
             PROJECT_ROOT / "deploy" / "cloud" / "scripts" / "prepare-host.sh"
@@ -329,9 +335,29 @@ class CloudSecurityUnitTest(unittest.TestCase):
         self.assertIn("acme.sh.*--cron", certificate_script)
         self.assertIn("before-jx-", nginx_configure_script)
         self.assertIn("已恢复原宝塔配置", nginx_configure_script)
-        self.assertIn("127.0.0.1:1215", nginx_configure_script)
-        self.assertIn("proxy_pass http://127.0.0.1:1215", ip_nginx)
-        self.assertNotIn("8765", ip_nginx)
+        self.assertIn("公网 HTTPS 1215", nginx_configure_script)
+        self.assertIn("内部 127.0.0.1:8765", nginx_configure_script)
+        self.assertIn("listen 1215 ssl", ip_nginx)
+        self.assertIn("proxy_pass http://127.0.0.1:8765", ip_nginx)
+        domain_nginx = (
+            PROJECT_ROOT
+            / "deploy"
+            / "cloud"
+            / "nginx"
+            / "jx-handover-server.conf.example"
+        ).read_text(encoding="utf-8")
+        location_nginx = (
+            PROJECT_ROOT
+            / "deploy"
+            / "cloud"
+            / "nginx"
+            / "jx-handover-location.conf.example"
+        ).read_text(encoding="utf-8")
+        for nginx_text in (ip_nginx, domain_nginx, location_nginx):
+            # 非标准 HTTPS 端口必须把 Host（含端口）与转发端口传给后端。
+            self.assertIn("proxy_set_header Host $http_host;", nginx_text)
+            self.assertIn("proxy_set_header X-Forwarded-Host $http_host;", nginx_text)
+            self.assertIn("proxy_set_header X-Forwarded-Port 1215;", nginx_text)
 
 
 if __name__ == "__main__":

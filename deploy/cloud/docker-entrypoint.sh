@@ -18,7 +18,7 @@ python /opt/jx-handover/backend/scripts/cloud_preflight.py
 
 exec python -m uvicorn app.main:app \
     --host 0.0.0.0 \
-    --port 1215 \
+    --port 8765 \
     --workers 1 \
     --proxy-headers \
     --forwarded-allow-ips="*" \

@@ -66,6 +66,6 @@ if ! "${nginx_binary}" -t; then
 fi
 "${nginx_service}" reload
 
-echo "宝塔 IP 站点已反向代理到 127.0.0.1:1215。"
+echo "宝塔已在公网 HTTPS 1215 监听，并反向代理到内部 127.0.0.1:8765。"
 echo "仅允许 ${allowed_ip} 访问；原配置备份在 ${backup}。"
 echo "请分别从白名单内网络和手机流量测试，手机流量应返回 403。"

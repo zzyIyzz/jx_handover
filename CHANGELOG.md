@@ -7,7 +7,7 @@
 ### 云端运行与数据边界
 
 - 新增多阶段 Dockerfile：Node 构建 Vue，Python 运行 FastAPI；容器使用非 root UID 10001、只读根文件系统、最小 Linux capabilities 和日志轮转。
-- Compose 固定一个应用实例、一个 Uvicorn worker，并且只将云端内部端口 `1215` 发布到 ECS 宿主机 `127.0.0.1`；公网只开放宝塔 Nginx 的 HTTPS 443，Windows 旧版继续使用 `8765`。
+- Compose 固定一个应用实例、一个 Uvicorn worker，并且只将应用端口 `8765` 发布到 ECS 宿主机 `127.0.0.1`；宝塔 Nginx 单独在公网 HTTPS `1215` 监听，避免 Nginx 与 Docker 抢占同一端口。
 - 正式 SQLite、导入原件、历史 Word 和快照持久化到可自定义的 ECS 本地 ESSD 目录，镜像重建不覆盖数据；OSS/NAS 仍禁止承载活数据库。
 - 新增云端启动前恢复入口，管理员在网页安排恢复后，容器重启会先保留 `pre-restore` 完整备份再切换数据。
 - 修复 Windows 完整备份恢复到 Linux 时，历史 Word 绝对路径中的反斜杠无法识别的问题。
@@ -30,7 +30,7 @@
 
 ### 验证
 
-- 原 32 项后端回归继续通过；新增 7 项云端测试，覆盖失败关闭、示例配置/IP 拒绝启动、最小健康信息、可信 Host、跨站写阻止、Secure Cookie、安全响应头、登录限流、Windows→Linux 路径重写、1215 端口发布和无域名 IP 证书部署约束。
+- 原 32 项后端回归继续通过；新增 7 项云端测试，覆盖失败关闭、示例配置/IP 拒绝启动、最小健康信息、可信 Host、跨站写阻止、Secure Cookie、安全响应头、登录限流、Windows→Linux 路径重写、公网 1215/内部 8765 分离和无域名 IP 证书部署约束。
 - 前端生产构建通过；Compose `config --quiet` 和全部 Bash 脚本 `bash -n` 通过。
 - 当前开发机 Docker 客户端可用但 Linux 引擎未运行，因此真实镜像构建、容器健康、宝塔 HTTPS、IP 白名单、OSS RAM 角色和恢复演练仍是阿里云现场发布门槛。
 

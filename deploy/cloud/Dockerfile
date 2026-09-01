@@ -36,6 +36,6 @@ RUN groupadd --gid 10001 jxhandover \
     && chmod 0755 /usr/local/bin/jx-cloud-entrypoint
 
 USER 10001:10001
-EXPOSE 1215
+EXPOSE 8765
 
 ENTRYPOINT ["/usr/local/bin/jx-cloud-entrypoint"]

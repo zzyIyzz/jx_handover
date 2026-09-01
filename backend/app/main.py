@@ -88,6 +88,7 @@ def health():
         "auth_required": config.AUTH_REQUIRED,
     }
     if config.APP_MODE == "cloud":
+        public_payload["public_port"] = config.PUBLIC_PORT
         if journal_mode == "unknown":
             return JSONResponse(
                 status_code=503,

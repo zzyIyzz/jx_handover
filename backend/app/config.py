@@ -1,8 +1,9 @@
 """Global configuration shared by desktop, LAN-server and cloud packages.
 
-The existing Windows desktop/LAN packages keep port 8765.  The cloud profile
-uses the separately fixed internal port 1215 behind HTTPS port 443.  Bind
-address and security requirements depend on one of three explicit modes:
+The application keeps its existing port 8765.  In cloud mode that port is
+published only on ECS loopback, while BaoTa/Nginx owns the user-selected
+public HTTPS port 1215.  Bind address and security requirements depend on one
+of three explicit modes:
 
 ``desktop``
     Listen on loopback and keep data in the current user's LocalAppData.
@@ -63,14 +64,14 @@ configured_env_file = os.getenv("JX_HANDOVER_CONFIG_FILE", "").strip()
 if configured_env_file:
     load_dotenv(Path(configured_env_file).expanduser(), override=True)
 
-# Preserve the released Windows packages on 8765 while the cloud deployment
-# uses the user-selected internal port 1215.  Neither value is user-facing in
-# cloud mode because BaoTa/Nginx owns public HTTPS port 443.
+# Preserve the application port 8765 in every mode.  Cloud Docker publishes it
+# only on ECS loopback; BaoTa/Nginx separately owns public HTTPS port 1215.
 APP_MODE = os.getenv("JX_HANDOVER_MODE", "desktop").strip().lower()
 if APP_MODE not in {"desktop", "server", "cloud"}:
     APP_MODE = "desktop"
 APP_HOST = "0.0.0.0" if APP_MODE in {"server", "cloud"} else "127.0.0.1"
-APP_PORT = 1215 if APP_MODE == "cloud" else 8765
+APP_PORT = 8765
+PUBLIC_PORT = 1215 if APP_MODE == "cloud" else APP_PORT
 PUBLIC_HOST = os.getenv("JX_PUBLIC_HOST", "").strip()
 _explicit_public_url = os.getenv("JX_PUBLIC_URL", "").strip().rstrip("/")
 PUBLIC_URL = _explicit_public_url or (
@@ -200,7 +201,16 @@ def validate_runtime_configuration() -> None:
         or parsed.path not in {"", "/"}
     ):
         problems.append(
-            "JX_PUBLIC_URL 必须是无路径的 HTTPS 地址，例如 https://handover.example.com 或 https://公网IPv4。"
+            "JX_PUBLIC_URL 必须是无路径且显式包含 :1215 的 HTTPS 地址，例如 "
+            "https://handover.example.com:1215 或 https://公网IPv4:1215。"
+        )
+    try:
+        configured_public_port = parsed.port
+    except ValueError:
+        configured_public_port = None
+    if configured_public_port != PUBLIC_PORT:
+        problems.append(
+            f"云端 JX_PUBLIC_URL 必须显式包含公网 HTTPS 端口 :{PUBLIC_PORT}。"
         )
     if not AUTH_REQUIRED:
         problems.append("JX_AUTH_REQUIRED 必须为 1。")
