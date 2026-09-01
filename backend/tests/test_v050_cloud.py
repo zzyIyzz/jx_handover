@@ -267,6 +267,12 @@ class CloudSecurityUnitTest(unittest.TestCase):
         self.assertIn("deploy/cloud/oss-backup.env", dockerignore)
         self.assertIn("deploy/cloud/ossutilconfig", dockerignore)
 
+        deploy_script = (
+            PROJECT_ROOT / "deploy" / "cloud" / "scripts" / "deploy.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("正式数据目录不存在", deploy_script)
+        self.assertIn("prepare-host.sh", deploy_script)
+
 
 if __name__ == "__main__":
     unittest.main()

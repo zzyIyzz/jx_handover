@@ -23,6 +23,18 @@ if ! docker compose version >/dev/null 2>&1; then
 fi
 
 cd -- "${cloud_dir}"
+
+data_root="$(sed -n 's/^JX_HOST_DATA_DIR=//p' "${env_file}" | tail -n 1 | tr -d '\r')"
+data_root="${data_root%\"}"
+data_root="${data_root#\"}"
+data_root="${data_root%\'}"
+data_root="${data_root#\'}"
+if [[ -z "${data_root}" || ! -d "${data_root}" ]]; then
+  echo "正式数据目录不存在：${data_root:-（空）}" >&2
+  echo "修改 JX_HOST_DATA_DIR 后，请重新执行 sudo bash deploy/cloud/scripts/prepare-host.sh。" >&2
+  exit 1
+fi
+
 docker compose config --quiet
 docker compose build --pull
 docker compose up -d --remove-orphans
