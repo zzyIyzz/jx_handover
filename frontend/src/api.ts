@@ -46,6 +46,35 @@ export interface AuditEventView {
 export interface BackupResult {
   created_at: string; reason: string; database_file: string; sha256: string; size: number
   local_path: string; manifest_path: string; nas_path: string | null; nas_error: string
+  backup_id: string; bundle_file: string; bundle_size: number; bundle_sha256: string
+  file_count: number; payload_bytes: number; verification: string
+  nas_state: 'synced' | 'pending' | 'not_configured' | 'unknown'; nas_attempts: number
+}
+export interface BackupItem extends BackupResult {
+  local_present: boolean; verified_at?: string; nas_synced_at?: string; application_version?: string
+}
+export interface BackupStatusView {
+  total: number; pending_nas: number; latest_local_at: string | null; latest_local_id: string | null
+  latest_nas_at: string | null; latest_nas_id: string | null; nas_configured: boolean
+}
+export interface RestoreRequestView {
+  state: string; backup_id?: string; requested_by?: string; requested_at?: string
+  instruction?: string; completed_at?: string; failed_at?: string; error?: string
+  pre_restore_backup_id?: string
+}
+export interface RestoreStateView {
+  pending: RestoreRequestView | null; last_result: RestoreRequestView | null
+}
+export interface NasTestView {
+  configured: boolean; ok: boolean; identity: string; path: string
+  latency_ms: number | null; message: string
+}
+export interface DiagnosticsView {
+  checked_at: string; service_identity: string; public_url: string; data_root: string
+  database_path: string; database_size: number; database_check: string
+  disk_total: number; disk_used: number; disk_free: number; disk_free_percent: number
+  recent_users: number; backup: BackupStatusView; restore: RestoreStateView
+  nas: { configured: boolean; path: string }
 }
 
 export interface Station { id: number; code: string; name: string; aliases: string[] }
@@ -125,6 +154,19 @@ export const api = {
   adminAiTest: () => http.post<AiConnectionResult>('/admin/ai/test', {}, { timeout: 120000 }).then(r => r.data),
   adminAudit: (limit = 30) => http.get<AuditEventView[]>('/admin/audit', { params: { limit } }).then(r => r.data),
   adminBackup: () => http.post<BackupResult>('/admin/backup', {}, { timeout: 120000 }).then(r => r.data),
+  adminBackups: () => http.get<BackupItem[]>('/admin/backups').then(r => r.data),
+  adminDiagnostics: () => http.get<DiagnosticsView>('/admin/diagnostics').then(r => r.data),
+  adminRestoreState: () => http.get<RestoreStateView>('/admin/restore').then(r => r.data),
+  adminVerifyBackup: (backupId: string) =>
+    http.post<BackupResult>(`/admin/backups/${backupId}/verify`, {}, { timeout: 120000 }).then(r => r.data),
+  adminSyncBackup: (backupId: string) =>
+    http.post<BackupItem>(`/admin/backups/${backupId}/sync`, {}, { timeout: 120000 }).then(r => r.data),
+  adminSyncPending: () =>
+    http.post<{ attempted: number; synced: number; failed: number }>('/admin/backups/sync-pending', {}, { timeout: 120000 }).then(r => r.data),
+  adminTestNas: () => http.post<NasTestView>('/admin/backups/nas-test', {}, { timeout: 60000 }).then(r => r.data),
+  adminPrepareRestore: (backupId: string) =>
+    http.post<RestoreRequestView>(`/admin/backups/${backupId}/restore/prepare`, {}, { timeout: 120000 }).then(r => r.data),
+  adminCancelRestore: () => http.delete<{ cancelled: boolean }>('/admin/restore/pending').then(r => r.data),
   stations: () => http.get<Station[]>('/stations').then(r => r.data),
   listBatches: () => http.get<BatchSummary[]>('/handovers').then(r => r.data),
   createBatch: (body: Record<string, unknown>) =>

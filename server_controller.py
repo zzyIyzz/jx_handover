@@ -1,4 +1,4 @@
-"""Windowed administrator controller for the V0.4 Windows LAN server."""
+"""Windowed administrator controller for the V0.4.1 Windows LAN server."""
 from __future__ import annotations
 
 import ctypes
@@ -24,7 +24,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.4.1"
 PORT = 8765
 LOCAL_HEALTH_URL = f"http://127.0.0.1:{PORT}/api/health"
 CONTROLLER_MUTEX = "Local\\JXHandoverServerController-v040"
@@ -56,6 +56,8 @@ from server_config import (  # noqa: E402
     validate_local_data_root,
 )
 from server_migration import migrate_v030_data, relocate_server_data  # noqa: E402
+from server_recovery import import_backup_bundle, schedule_imported_restore  # noqa: E402
+from server_update import prepare_release_package  # noqa: E402
 
 
 if CONFIG_VERSION != APP_VERSION:
@@ -97,9 +99,9 @@ def _probe_writable_directory(path: Path) -> float:
     """Verify create, flush, rename, read and delete permissions."""
     started = time.perf_counter()
     path.mkdir(parents=True, exist_ok=True)
-    token = uuid.uuid4().hex
-    partial = path / f".jxhandover-deployment-test-{token}.partial"
-    verified = path / f".jxhandover-deployment-test-{token}.verified"
+    token = uuid.uuid4().hex[:8]
+    partial = path / f".jx-{token}.tmp"
+    verified = path / f".jx-{token}.ok"
     payload = b"JXHandover deployment write test\n"
     try:
         with partial.open("xb") as stream:
@@ -234,7 +236,10 @@ class ServerController:
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.state = "未启动"
         self.restart_after_stop = False
+        self.restore_starting = False
         self.migration_in_progress = False
+        self.update_in_progress = False
+        self.recovery_in_progress = False
         self.last_error = ""
         self.settings, self.secrets_value = load_server_settings()
         self.status_var = tk.StringVar(value=self.state)
@@ -374,6 +379,26 @@ class ServerController:
             tools, text="迁移正式数据目录", command=self.relocate_data_root
         )
         self.relocation_button.grid(row=2, column=0, padx=5, pady=5, sticky="ew")
+        ttk.Button(
+            tools, text="打开完整备份目录", command=self.open_full_backups
+        ).grid(row=3, column=0, padx=5, pady=5, sticky="ew")
+        ttk.Button(
+            tools, text="查看 / 取消待恢复", command=self.manage_pending_restore
+        ).grid(row=3, column=1, columnspan=2, padx=5, pady=5, sticky="ew")
+        self.update_button = ttk.Button(
+            tools, text="校验并准备新版本（不覆盖旧版）", command=self.prepare_update
+        )
+        self.update_button.grid(
+            row=4, column=0, columnspan=3, padx=5, pady=5, sticky="ew"
+        )
+        self.recovery_button = ttk.Button(
+            tools,
+            text="从 NAS 导入完整备份并安排恢复",
+            command=self.import_nas_backup,
+        )
+        self.recovery_button.grid(
+            row=5, column=0, columnspan=3, padx=5, pady=5, sticky="ew"
+        )
         for column in range(3):
             tools.grid_columnconfigure(column, weight=1)
 
@@ -392,6 +417,7 @@ class ServerController:
                 "• 后台服务器与本控制器是两个独立进程，关闭控制器不会影响值班人员。\n"
                 "• “安全停止”只写入目标实例的 stop.request，绝不按端口或 PID 强杀进程。\n"
                 "• 正式数据库必须保存在服务器本地；NAS 只接收已完成并校验的备份副本。\n"
+                "• 完整备份同时保留数据库、导入原件和历史 Word；恢复只在安全重启时执行。\n"
                 "• 配置修改需要重启服务器后生效，Qwen Key 不会发送到浏览器。"
             ),
             font=("Microsoft YaHei UI", 9),
@@ -528,6 +554,66 @@ class ServerController:
             messagebox.showerror("正式数据目录不可用", str(exc), parent=self.root)
             return
         self._open_path(root)
+
+    def _restore_directory(self) -> Path:
+        return configured_data_root(self.settings) / "snapshots" / "restore"
+
+    def _pending_restore(self) -> dict | None:
+        path = self._restore_directory() / "pending.json"
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            return value if isinstance(value, dict) else None
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def open_full_backups(self) -> None:
+        self._open_path(
+            configured_data_root(self.settings) / "snapshots" / "full_backups"
+        )
+
+    def manage_pending_restore(self) -> None:
+        pending_path = self._restore_directory() / "pending.json"
+        pending = self._pending_restore()
+        if pending is None:
+            result_path = self._restore_directory() / "last-result.json"
+            try:
+                result = json.loads(result_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                result = None
+            if isinstance(result, dict):
+                state = "完成" if result.get("state") == "completed" else "失败"
+                messagebox.showinfo(
+                    "当前没有待恢复任务",
+                    f"上次恢复状态：{state}\n"
+                    f"备份编号：{result.get('backup_id') or '—'}\n"
+                    f"时间：{result.get('completed_at') or result.get('failed_at') or '—'}\n"
+                    f"说明：{result.get('error') or '恢复前数据已另行完整备份。'}",
+                    parent=self.root,
+                )
+            else:
+                messagebox.showinfo(
+                    "当前没有待恢复任务",
+                    "请在网页右上角“系统管理”中选择已经校验的完整备份并安排恢复。",
+                    parent=self.root,
+                )
+            return
+        if messagebox.askyesno(
+            "已有待恢复任务",
+            f"备份编号：{pending.get('backup_id') or '—'}\n"
+            f"安排人：{pending.get('requested_by') or '—'}\n"
+            f"安排时间：{pending.get('requested_at') or '—'}\n\n"
+            "点击“是”将取消这次待恢复任务。当前数据库和备份文件不会发生变化。",
+            parent=self.root,
+        ):
+            try:
+                pending_path.unlink(missing_ok=True)
+                messagebox.showinfo(
+                    "已取消待恢复",
+                    "当前正式数据没有变化，完整备份仍然保留。",
+                    parent=self.root,
+                )
+            except OSError as exc:
+                messagebox.showerror("取消失败", str(exc), parent=self.root)
 
     def test_configuration(self) -> None:
         collected = self._validate_and_collect()
@@ -796,8 +882,12 @@ class ServerController:
         return [sys.executable, str(Path(__file__).resolve().parent / "server_runner.py")]
 
     def start(self) -> None:
-        if self.migration_in_progress:
-            messagebox.showinfo("正在迁移", "请等待数据迁移完成后再启动服务器。", parent=self.root)
+        if self.migration_in_progress or self.update_in_progress or self.recovery_in_progress:
+            messagebox.showinfo(
+                "维护操作进行中",
+                "请等待数据迁移或升级包准备完成后再启动服务器。",
+                parent=self.root,
+            )
             return
         payload = _health_payload()
         if payload:
@@ -809,7 +899,24 @@ class ServerController:
             return
         if not self.save_settings(notify=False):
             return
-        self._set_state("正在启动", "正在启动独立后台服务器并等待健康检查……")
+        pending = self._pending_restore()
+        self.restore_starting = pending is not None
+        if pending and not messagebox.askyesno(
+            "启动时将执行数据恢复",
+            f"已安排从完整备份恢复：\n{pending.get('backup_id') or '未知编号'}\n\n"
+            "启动过程会先完整备份当前数据，再校验并恢复数据库、导入原件和历史 Word。"
+            "数据量较大时可能需要几分钟，期间请勿关闭电脑。是否继续启动？",
+            parent=self.root,
+        ):
+            self.restore_starting = False
+            self._set_state("未启动", "已取消本次启动；待恢复任务仍保留。")
+            return
+        detail = (
+            "正在校验备份、保存当前数据并执行恢复；完成后会自动启动网页服务……"
+            if self.restore_starting
+            else "正在启动独立后台服务器并等待健康检查……"
+        )
+        self._set_state("正在启动", detail)
         threading.Thread(target=self._start_worker, name="server-start", daemon=True).start()
 
     def _start_worker(self) -> None:
@@ -831,7 +938,8 @@ class ServerController:
                 close_fds=True,
                 creationflags=flags,
             )
-            deadline = time.monotonic() + 35
+            timeout_seconds = 1800 if self.restore_starting else 60
+            deadline = time.monotonic() + timeout_seconds
             while time.monotonic() < deadline:
                 payload = _health_payload(timeout=0.6)
                 if payload:
@@ -844,7 +952,11 @@ class ServerController:
                     raise RuntimeError(error.splitlines()[0])
                 time.sleep(0.35)
             error = _read_runner_error()
-            raise RuntimeError(error.splitlines()[0] if error else "35 秒内未通过健康检查，请打开运行日志。")
+            raise RuntimeError(
+                error.splitlines()[0]
+                if error
+                else f"{timeout_seconds} 秒内未通过健康检查，请打开运行日志。"
+            )
         except Exception as exc:  # noqa: BLE001
             self.events.put(("failure", f"启动服务器失败：{exc}"))
 
@@ -890,6 +1002,11 @@ class ServerController:
             self.nas_backup_var.set(selected)
 
     def relocate_data_root(self) -> None:
+        if self.update_in_progress or self.recovery_in_progress:
+            messagebox.showinfo(
+                "维护操作进行中", "请等待当前维护操作完成。", parent=self.root
+            )
+            return
         if _health_payload() or _runner_is_starting():
             messagebox.showwarning(
                 "请先停止服务器",
@@ -942,6 +1059,8 @@ class ServerController:
         self.migration_in_progress = True
         self.migration_button.configure(state="disabled")
         self.relocation_button.configure(state="disabled")
+        self.update_button.configure(state="disabled")
+        self.recovery_button.configure(state="disabled")
         self.start_button.configure(state="disabled")
         self.detail_var.set("正在复制并校验正式数据，请不要关闭控制器或启动服务器……")
         threading.Thread(
@@ -964,6 +1083,11 @@ class ServerController:
             self.events.put(("relocation_failure", str(exc)))
 
     def migrate_v030(self) -> None:
+        if self.update_in_progress or self.recovery_in_progress:
+            messagebox.showinfo(
+                "维护操作进行中", "请等待当前维护操作完成。", parent=self.root
+            )
+            return
         if _health_payload() or _runner_is_starting():
             messagebox.showwarning(
                 "请先停止服务器",
@@ -995,6 +1119,8 @@ class ServerController:
         self.migration_in_progress = True
         self.migration_button.configure(state="disabled")
         self.relocation_button.configure(state="disabled")
+        self.update_button.configure(state="disabled")
+        self.recovery_button.configure(state="disabled")
         self.start_button.configure(state="disabled")
         self.detail_var.set("正在一致备份并迁移 V0.3 数据，请不要关闭控制器……")
         threading.Thread(
@@ -1037,6 +1163,131 @@ class ServerController:
         except OSError as exc:
             self._failure(f"生成共享盘网页入口失败：{exc}")
             messagebox.showerror("生成失败", str(exc), parent=self.root)
+
+    def prepare_update(self) -> None:
+        if self.migration_in_progress or self.update_in_progress or self.recovery_in_progress:
+            messagebox.showinfo(
+                "维护操作进行中", "请等待当前维护操作完成。", parent=self.root
+            )
+            return
+        selected = filedialog.askopenfilename(
+            title="选择新版完整 ZIP（同目录必须有 .sha256）",
+            filetypes=[("Windows 发布包", "*.zip")],
+            parent=self.root,
+        )
+        if not selected:
+            return
+        current_directory = (
+            Path(sys.executable).resolve().parent
+            if getattr(sys, "frozen", False)
+            else RESOURCE_ROOT
+        )
+        initial_parent = current_directory.parent
+        install_parent = filedialog.askdirectory(
+            title="选择版本安装总目录（新旧版本将并列保留）",
+            initialdir=str(initial_parent),
+            parent=self.root,
+        )
+        if not install_parent:
+            return
+        if not messagebox.askyesno(
+            "准备新版本",
+            f"升级包：\n{selected}\n\n版本安装总目录：\n{install_parent}\n\n"
+            "系统将核对 SHA256、检查 ZIP 结构并解压到新目录，不覆盖或删除当前版本。"
+            "准备完成后仍需先创建完整备份并安全停止旧版。是否继续？",
+            parent=self.root,
+        ):
+            return
+        self.update_in_progress = True
+        self.update_button.configure(state="disabled")
+        self.recovery_button.configure(state="disabled")
+        self.migration_button.configure(state="disabled")
+        self.relocation_button.configure(state="disabled")
+        self.start_button.configure(state="disabled")
+        self.detail_var.set("正在本机校验 SHA256 并准备新版本目录，请勿关闭控制器……")
+        threading.Thread(
+            target=self._prepare_update_worker,
+            args=(Path(selected), Path(install_parent)),
+            name="prepare-update",
+            daemon=True,
+        ).start()
+
+    def _prepare_update_worker(self, package: Path, install_parent: Path) -> None:
+        try:
+            result = prepare_release_package(package, install_parent)
+            self.events.put(("update_prepared", result))
+        except Exception as exc:  # noqa: BLE001 - shown to administrator
+            logging.exception("Release package preparation failed")
+            self.events.put(("update_failure", str(exc)))
+
+    def import_nas_backup(self) -> None:
+        if self.migration_in_progress or self.update_in_progress or self.recovery_in_progress:
+            messagebox.showinfo(
+                "维护操作进行中", "请等待当前维护操作完成。", parent=self.root
+            )
+            return
+        if _health_payload() or _runner_is_starting():
+            messagebox.showwarning(
+                "请先安全停止服务器",
+                "从外部导入灾备恢复集前，请先安全停止服务器。普通本地恢复可在网页恢复中心安排。",
+                parent=self.root,
+            )
+            return
+        selected = filedialog.askopenfilename(
+            title="选择 NAS 上的完整备份 ZIP（同目录必须有同名 JSON）",
+            initialdir=(
+                self.nas_backup_var.get().strip()
+                if self.nas_backup_var.get().strip()
+                and Path(self.nas_backup_var.get().strip()).exists()
+                else None
+            ),
+            filetypes=[("交接班完整备份", "jx-handover-backup-*.zip"), ("ZIP", "*.zip")],
+            parent=self.root,
+        )
+        if not selected:
+            return
+        try:
+            data_root = validate_local_data_root(
+                configured_data_root(self.settings), create=True
+            )
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("正式数据目录不可用", str(exc), parent=self.root)
+            return
+        if not messagebox.askyesno(
+            "导入并安排灾备恢复",
+            f"外部完整备份：\n{selected}\n\n"
+            f"服务器本地正式数据目录：\n{data_root}\n\n"
+            "系统将先在本机验证 ZIP、全部文件 SHA256 和 SQLite，复制到本地恢复中心，"
+            "然后登记为下次启动恢复。不会覆盖同名不同内容的备份。是否继续？",
+            parent=self.root,
+        ):
+            return
+        self.recovery_in_progress = True
+        self.recovery_button.configure(state="disabled")
+        self.update_button.configure(state="disabled")
+        self.migration_button.configure(state="disabled")
+        self.relocation_button.configure(state="disabled")
+        self.start_button.configure(state="disabled")
+        self.detail_var.set("正在从 NAS 读取并全量校验完整备份，请勿关闭控制器……")
+        threading.Thread(
+            target=self._import_nas_backup_worker,
+            args=(Path(selected), data_root),
+            name="import-nas-backup",
+            daemon=True,
+        ).start()
+
+    def _import_nas_backup_worker(self, package: Path, data_root: Path) -> None:
+        try:
+            imported = import_backup_bundle(package, data_root)
+            request = schedule_imported_restore(
+                data_root,
+                imported,
+                requested_by=os.environ.get("USERNAME", "server-controller"),
+            )
+            self.events.put(("recovery_imported", {"imported": imported, "request": request}))
+        except Exception as exc:  # noqa: BLE001 - shown to administrator
+            logging.exception("External backup import failed")
+            self.events.put(("recovery_failure", str(exc)))
 
     def _packaged_script(self, filename: str) -> Path:
         candidates = [
@@ -1112,6 +1363,21 @@ class ServerController:
                 event, payload = self.events.get_nowait()
                 if event == "started":
                     self._show_running(payload if isinstance(payload, dict) else {})
+                    if self.restore_starting:
+                        self.restore_starting = False
+                        result_path = self._restore_directory() / "last-result.json"
+                        try:
+                            result = json.loads(result_path.read_text(encoding="utf-8"))
+                        except (OSError, ValueError, TypeError):
+                            result = {}
+                        messagebox.showinfo(
+                            "数据恢复完成",
+                            "完整备份已恢复，服务器也已正常启动。\n\n"
+                            f"恢复来源：{result.get('backup_id') or '—'}\n"
+                            f"恢复前留底：{result.get('pre_restore_backup_id') or '—'}\n\n"
+                            "请登录网页抽查班次、导入原件和历史 Word。",
+                            parent=self.root,
+                        )
                     if self.auto_open_var.get():
                         self.open_system()
                 elif event == "stopped":
@@ -1121,11 +1387,15 @@ class ServerController:
                         self.root.after(500, self.start)
                 elif event == "failure":
                     self.restart_after_stop = False
+                    self.restore_starting = False
                     self._failure(str(payload))
                 elif event == "migration_done":
                     self.migration_in_progress = False
                     self.migration_button.configure(state="normal")
                     self.relocation_button.configure(state="normal")
+                    self.update_button.configure(state="normal")
+                    self.recovery_button.configure(state="normal")
+                    self.start_button.configure(state="normal")
                     self._set_state(
                         "未启动",
                         "V0.3 数据迁移完成。启动服务器后会自动升级数据库结构。",
@@ -1146,6 +1416,9 @@ class ServerController:
                     self.migration_in_progress = False
                     self.migration_button.configure(state="normal")
                     self.relocation_button.configure(state="normal")
+                    self.update_button.configure(state="normal")
+                    self.recovery_button.configure(state="normal")
+                    self.start_button.configure(state="normal")
                     self._failure(f"V0.3 数据迁移失败：{payload}")
                     messagebox.showerror(
                         "迁移失败",
@@ -1156,6 +1429,9 @@ class ServerController:
                     self.migration_in_progress = False
                     self.migration_button.configure(state="normal")
                     self.relocation_button.configure(state="normal")
+                    self.update_button.configure(state="normal")
+                    self.recovery_button.configure(state="normal")
+                    self.start_button.configure(state="normal")
                     result = payload if isinstance(payload, dict) else {}
                     settings = result.get("settings") or {}
                     self.settings = settings
@@ -1177,10 +1453,82 @@ class ServerController:
                     self.migration_in_progress = False
                     self.migration_button.configure(state="normal")
                     self.relocation_button.configure(state="normal")
+                    self.update_button.configure(state="normal")
+                    self.recovery_button.configure(state="normal")
+                    self.start_button.configure(state="normal")
                     self._failure(f"正式数据目录迁移失败：{payload}")
                     messagebox.showerror(
                         "正式数据目录迁移失败",
                         f"{payload}\n\n控制器仍使用旧正式数据目录，旧数据库未删除。",
+                        parent=self.root,
+                    )
+                elif event == "update_prepared":
+                    self.update_in_progress = False
+                    self.update_button.configure(state="normal")
+                    self.recovery_button.configure(state="normal")
+                    self.migration_button.configure(state="normal")
+                    self.relocation_button.configure(state="normal")
+                    self.start_button.configure(state="normal")
+                    result = payload if isinstance(payload, dict) else {}
+                    self.detail_var.set("新版本已完成校验并安全解压；当前运行版本未改变。")
+                    messagebox.showinfo(
+                        "新版本准备完成",
+                        f"版本：V{result.get('version') or '未知'}\n"
+                        f"目录：\n{result.get('install_path') or ''}\n\n"
+                        "正式切换顺序：\n"
+                        "1. 在网页“系统管理”创建完整备份；\n"
+                        "2. 用当前控制器安全停止服务器并关闭控制器；\n"
+                        "3. 打开新目录中的“服务器控制器.exe”并启动；\n"
+                        "4. 验证失败时停止新版，再从旧目录启动即可回滚。",
+                        parent=self.root,
+                    )
+                    install_path = str(result.get("install_path") or "").strip()
+                    if install_path:
+                        self._open_path(Path(install_path))
+                elif event == "update_failure":
+                    self.update_in_progress = False
+                    self.update_button.configure(state="normal")
+                    self.recovery_button.configure(state="normal")
+                    self.migration_button.configure(state="normal")
+                    self.relocation_button.configure(state="normal")
+                    self.start_button.configure(state="normal")
+                    self._failure(f"升级包准备失败：{payload}")
+                    messagebox.showerror(
+                        "升级包未准备",
+                        f"{payload}\n\n当前版本、数据库和旧版本目录均未改变。",
+                        parent=self.root,
+                    )
+                elif event == "recovery_imported":
+                    self.recovery_in_progress = False
+                    self.recovery_button.configure(state="normal")
+                    self.update_button.configure(state="normal")
+                    self.migration_button.configure(state="normal")
+                    self.relocation_button.configure(state="normal")
+                    self.start_button.configure(state="normal")
+                    result = payload if isinstance(payload, dict) else {}
+                    imported = result.get("imported") or {}
+                    self._set_state(
+                        "未启动",
+                        "外部完整备份已复制到服务器本地并通过全量校验，等待启动恢复。",
+                    )
+                    messagebox.showinfo(
+                        "灾备恢复已准备",
+                        f"备份编号：{imported.get('backup_id') or '—'}\n"
+                        f"本地副本：\n{imported.get('local_bundle_path') or ''}\n\n"
+                        "现在点击“启动服务器”。控制器会再次确认，服务器将在网页开放前完成恢复。",
+                        parent=self.root,
+                    )
+                elif event == "recovery_failure":
+                    self.recovery_in_progress = False
+                    self.recovery_button.configure(state="normal")
+                    self.update_button.configure(state="normal")
+                    self.migration_button.configure(state="normal")
+                    self.relocation_button.configure(state="normal")
+                    self.start_button.configure(state="normal")
+                    self._failure(f"外部完整备份导入失败：{payload}")
+                    messagebox.showerror(
+                        "灾备恢复未安排",
+                        f"{payload}\n\n当前正式数据库没有被替换；请检查 ZIP 与同名 JSON 是否成对且未被修改。",
                         parent=self.root,
                     )
         except queue.Empty:
@@ -1188,10 +1536,10 @@ class ServerController:
         self.root.after(200, self._drain_events)
 
     def _close(self) -> None:
-        if self.migration_in_progress:
+        if self.migration_in_progress or self.update_in_progress or self.recovery_in_progress:
             messagebox.showwarning(
-                "迁移尚未完成",
-                "请等待数据迁移完成后再关闭控制器。",
+                "维护操作尚未完成",
+                "请等待数据迁移或升级包准备完成后再关闭控制器。",
                 parent=self.root,
             )
             return

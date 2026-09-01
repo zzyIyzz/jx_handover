@@ -14,9 +14,9 @@ from app.audit import audit_requests
 from app.bootstrap import initialize_application_data
 from app.db import engine
 from app.security import initialize_session_secret
-from app.services.backup import maybe_daily_backup
+from app.services.backup import backup_status, maybe_daily_backup, pending_restore_status
 
-APP_VERSION = "0.4.0"
+APP_VERSION = config.APP_VERSION
 
 app = FastAPI(title="江西片区智能交接班系统", version=APP_VERSION)
 
@@ -60,6 +60,10 @@ def health():
                 ).lower()
         except Exception:  # noqa: BLE001 - health still reports service state
             journal_mode = "unknown"
+    try:
+        backups = backup_status()
+    except Exception:  # noqa: BLE001 - health must remain available
+        backups = {"status": "unavailable"}
     return {
         "status": "ok",
         "service": "jx-handover",
@@ -74,6 +78,9 @@ def health():
         "ai_mode": config.AI_MODE,
         "ai_model": config.QWEN_MODEL if config.AI_MODE == "qwen" else "mock",
         "ai_configured": bool(config.QWEN_API_KEY) if config.AI_MODE == "qwen" else True,
+        "data_root": str(config.USER_DATA_ROOT),
+        "backup": backups,
+        "restore_pending": pending_restore_status() is not None,
     }
 
 

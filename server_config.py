@@ -1,4 +1,4 @@
-"""Machine-local settings for the V0.4 Windows LAN server package."""
+"""Machine-local settings for the V0.4.1 Windows LAN server package."""
 from __future__ import annotations
 
 import base64
@@ -14,7 +14,7 @@ from typing import Any
 import uuid
 
 
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.4.1"
 DEFAULT_QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DEFAULT_MODEL = "qwen3.8-flash"
 
@@ -111,7 +111,7 @@ def validate_local_data_root(value: str | Path, *, create: bool = True) -> Path:
         )
     if create:
         path.mkdir(parents=True, exist_ok=True)
-        probe = path / f".jxhandover-write-test-{uuid.uuid4().hex}.tmp"
+        probe = path / f".jx-{uuid.uuid4().hex[:8]}.tmp"
         try:
             with probe.open("xb") as stream:
                 stream.write(b"JXHandover local data directory probe\n")

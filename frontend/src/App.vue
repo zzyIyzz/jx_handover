@@ -69,7 +69,7 @@
               </el-dropdown-menu>
             </template>
           </el-dropdown>
-          <span class="version">V0.4.0 局域网多人 AI 版</span>
+          <span class="version">V0.4.1 生产加固测试版</span>
         </div>
       </div>
     </el-header>

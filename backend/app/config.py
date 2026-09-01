@@ -17,6 +17,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
+APP_VERSION = "0.4.1"
+
+
 def _env_float(name: str, default: float, *, minimum: float) -> float:
     """Read a numeric setting without making a typo prevent startup."""
     raw = os.getenv(name, "").strip()

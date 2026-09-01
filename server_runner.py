@@ -1,4 +1,4 @@
-"""Headless V0.4 LAN server process for the Windows server package.
+"""Headless V0.4.1 LAN server process for the Windows server package.
 
 The controller intentionally launches this executable as a detached process.
 Closing the controller therefore cannot terminate the shared service.  A
@@ -22,7 +22,7 @@ import traceback
 import uuid
 
 
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.4.1"
 HOST = "0.0.0.0"
 PORT = 8765
 MUTEX_NAME = "Global\\JXHandoverServer-v040"
@@ -169,7 +169,7 @@ def _monitor_control(server, instance_id: str, daily_backup) -> None:
                 result = daily_backup()
                 if result:
                     logging.info(
-                        "Daily database backup completed: %s",
+                        "Daily full business backup completed: %s",
                         result.get("local_path") or result.get("database_file"),
                     )
                     if result.get("nas_error"):
@@ -207,6 +207,19 @@ def run_server() -> int:
         if _port_is_in_use():
             raise RuntimeError(
                 "端口 0.0.0.0:8765 已被占用。服务器未强制结束任何进程。"
+            )
+
+        # A restore request is only applied after this runner owns the stable
+        # server mutex and has proved no process is serving port 8765.  FastAPI
+        # and its SQLAlchemy sessions have not started yet.
+        from app.services.backup import apply_pending_restore
+
+        restore_result = apply_pending_restore()
+        if restore_result:
+            logging.info(
+                "Restore completed from backup %s; pre-restore backup is %s",
+                restore_result.get("backup_id"),
+                restore_result.get("pre_restore_backup_id"),
             )
 
         STOP_REQUEST_PATH.parent.mkdir(parents=True, exist_ok=True)

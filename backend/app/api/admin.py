@@ -1,14 +1,33 @@
-"""Administrator diagnostics. Secrets are never returned."""
+"""Administrator diagnostics, verified backups and safe restore scheduling."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+import shutil
+import sqlite3
+
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app import config
 from app.db import get_db
 from app.models import AuditEvent
 from app.security import Identity, require_admin
 from app.services.ai.adapter import ai_configuration_status, test_qwen_connection
-from app.services.backup import create_database_backup
+from app.services.backup import (
+    backup_status,
+    cancel_scheduled_restore,
+    create_full_backup,
+    last_restore_result,
+    list_full_backups,
+    pending_restore_status,
+    replicate_backup,
+    replicate_pending_backups,
+    schedule_restore,
+    service_identity,
+    test_nas_access,
+    verify_full_backup,
+)
 
 
 router = APIRouter(
@@ -54,6 +73,131 @@ def recent_audit(
     } for row in rows]
 
 
+def _raise_backup_error(exc: Exception) -> None:
+    if isinstance(exc, FileNotFoundError):
+        raise HTTPException(404, str(exc)) from exc
+    if isinstance(exc, ValueError):
+        raise HTTPException(422, str(exc)) from exc
+    raise HTTPException(409, str(exc)) from exc
+
+
 @router.post("/backup")
 def backup_now():
-    return create_database_backup(reason="manual")
+    try:
+        return create_full_backup(reason="manual")
+    except Exception as exc:  # noqa: BLE001 - return an actionable UI message
+        _raise_backup_error(exc)
+
+
+@router.get("/backups")
+def backups():
+    return list_full_backups()
+
+
+@router.post("/backups/sync-pending")
+def sync_pending_backups():
+    return replicate_pending_backups(limit=100)
+
+
+@router.post("/backups/nas-test")
+def nas_access_test():
+    return test_nas_access()
+
+
+@router.post("/backups/{backup_id}/verify")
+def verify_backup(backup_id: str):
+    try:
+        return verify_full_backup(backup_id)
+    except Exception as exc:  # noqa: BLE001 - translate service errors for UI
+        _raise_backup_error(exc)
+
+
+@router.post("/backups/{backup_id}/sync")
+def sync_backup(backup_id: str):
+    try:
+        result = replicate_backup(backup_id)
+    except Exception as exc:  # noqa: BLE001
+        _raise_backup_error(exc)
+    if result.get("nas_state") != "synced":
+        raise HTTPException(409, result.get("nas_error") or "共享盘同步失败。")
+    return result
+
+
+@router.get("/restore")
+def restore_state():
+    return {
+        "pending": pending_restore_status(),
+        "last_result": last_restore_result(),
+    }
+
+
+@router.post("/backups/{backup_id}/restore/prepare")
+def prepare_restore(
+    backup_id: str,
+    identity: Identity = Depends(require_admin),
+):
+    try:
+        return schedule_restore(backup_id, requested_by=identity.name)
+    except Exception as exc:  # noqa: BLE001
+        _raise_backup_error(exc)
+
+
+@router.delete("/restore/pending")
+def cancel_restore():
+    return cancel_scheduled_restore()
+
+
+@router.get("/diagnostics")
+def diagnostics(
+    db: Session = Depends(get_db),
+    _identity: Identity = Depends(require_admin),
+):
+    usage = shutil.disk_usage(config.USER_DATA_ROOT)
+    database_check = "missing"
+    database_size = 0
+    if config.DATABASE_PATH.is_file():
+        database_size = config.DATABASE_PATH.stat().st_size
+        try:
+            connection = sqlite3.connect(
+                f"file:{config.DATABASE_PATH.as_posix()}?mode=ro", uri=True, timeout=10
+            )
+            try:
+                row = connection.execute("PRAGMA quick_check").fetchone()
+                database_check = str(row[0]) if row else "unknown"
+            finally:
+                connection.close()
+        except sqlite3.Error as exc:
+            database_check = f"error: {exc}"
+
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(minutes=10)
+    ).isoformat(timespec="seconds")
+    recent = (
+        db.query(AuditEvent.client_ip, AuditEvent.actor_name)
+        .filter(AuditEvent.created_at >= cutoff)
+        .distinct()
+        .all()
+    )
+    return {
+        "checked_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "service_identity": service_identity(),
+        "public_url": config.PUBLIC_URL,
+        "data_root": str(config.USER_DATA_ROOT),
+        "database_path": str(config.DATABASE_PATH),
+        "database_size": database_size,
+        "database_check": database_check,
+        "disk_total": usage.total,
+        "disk_used": usage.used,
+        "disk_free": usage.free,
+        "disk_free_percent": round(usage.free / usage.total * 100, 1) if usage.total else 0,
+        "recent_users": len(recent),
+        "backup": backup_status(),
+        "restore": {
+            "pending": pending_restore_status(),
+            "last_result": last_restore_result(),
+        },
+        "nas": {
+            "configured": bool(config.NAS_BACKUP_DIR),
+            "path": config.NAS_BACKUP_DIR,
+        },
+    }
