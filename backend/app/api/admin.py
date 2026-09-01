@@ -180,6 +180,7 @@ def diagnostics(
     )
     return {
         "checked_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "mode": config.APP_MODE,
         "service_identity": service_identity(),
         "public_url": config.PUBLIC_URL,
         "data_root": str(config.USER_DATA_ROOT),

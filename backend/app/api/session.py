@@ -1,7 +1,7 @@
 """Browser identity endpoints for the LAN edition."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -10,9 +10,12 @@ from app.db import get_db
 from app.models import Staff
 from app.security import (
     COOKIE_NAME,
+    assert_login_allowed,
     authenticate_staff,
     identity_from_request,
     issue_session,
+    record_login_failure,
+    record_login_success,
 )
 
 
@@ -60,10 +63,21 @@ def current_session(request: Request):
 
 
 @router.post("/login")
-def login(req: LoginRequest, response: Response, db: Session = Depends(get_db)):
-    identity = authenticate_staff(
-        db, name=req.name, access_code=req.access_code
-    )
+def login(
+    req: LoginRequest,
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    login_keys = assert_login_allowed(request, req.name)
+    try:
+        identity = authenticate_staff(
+            db, name=req.name, access_code=req.access_code
+        )
+    except HTTPException:
+        record_login_failure(login_keys)
+        raise
+    record_login_success(login_keys)
     token = issue_session(identity)
     response.set_cookie(
         COOKIE_NAME,
@@ -71,7 +85,7 @@ def login(req: LoginRequest, response: Response, db: Session = Depends(get_db)):
         max_age=config.SESSION_TTL_HOURS * 3600,
         httponly=True,
         samesite="strict",
-        secure=False,
+        secure=config.COOKIE_SECURE,
         path="/",
     )
     return {"authenticated": True, **_identity_payload(identity)}
@@ -79,5 +93,11 @@ def login(req: LoginRequest, response: Response, db: Session = Depends(get_db)):
 
 @router.post("/logout")
 def logout(response: Response):
-    response.delete_cookie(COOKIE_NAME, path="/")
+    response.delete_cookie(
+        COOKIE_NAME,
+        path="/",
+        secure=config.COOKIE_SECURE,
+        httponly=True,
+        samesite="strict",
+    )
     return {"authenticated": False}

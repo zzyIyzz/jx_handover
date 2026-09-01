@@ -1,0 +1,43 @@
+# 这是完整结构示例。实际证书路径由宝塔“SSL”页生成，请不要照抄示例路径。
+server {
+    listen 80;
+    server_name handover.example.com;
+
+    # 保留宝塔实际生成的 ACME 校验 location，避免证书自动续期被白名单阻断。
+    location ^~ /.well-known/acme-challenge/ {
+        root /www/wwwroot/handover.example.com;
+        allow all;
+    }
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    server_name handover.example.com;
+
+    # 使用宝塔签发后实际生成的证书路径。
+    ssl_certificate /www/server/panel/vhost/cert/handover.example.com/fullchain.pem;
+    ssl_certificate_key /www/server/panel/vhost/cert/handover.example.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    client_max_body_size 100m;
+
+    location / {
+        allow 203.0.113.10;
+        # allow 10.66.0.0/24;
+        deny all;
+
+        proxy_pass http://127.0.0.1:8765;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_connect_timeout 10s;
+        proxy_send_timeout 180s;
+        proxy_read_timeout 180s;
+    }
+}

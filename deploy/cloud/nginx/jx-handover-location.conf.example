@@ -1,0 +1,27 @@
+# 放入宝塔站点的 HTTPS server 块中。先替换白名单，再保存并重载 Nginx。
+# 不要把 0.0.0.0/0、allow all 或 CDN 回源地址当作用户白名单。
+
+client_max_body_size 100m;
+
+location / {
+    # 示例：公司固定公网出口 IP。每个真实地址单独一行。
+    allow 203.0.113.10;
+    # 示例：若通过企业 VPN 访问，可填写 VPN 客户端网段。
+    # allow 10.66.0.0/24;
+    deny all;
+
+    proxy_pass http://127.0.0.1:8765;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    # Nginx 是唯一可信边界，覆盖客户端自带 X-Forwarded-For，避免伪造审计 IP。
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_set_header X-Forwarded-Host $host;
+
+    proxy_connect_timeout 10s;
+    proxy_send_timeout 180s;
+    proxy_read_timeout 180s;
+    proxy_request_buffering on;
+    proxy_buffering on;
+}

@@ -8,7 +8,7 @@
       <div class="login-mark connection-mark">!</div>
       <span class="login-eyebrow">暂时无法连接</span>
       <h1>{{ networkOnline ? '系统初始化失败' : '交接班服务器未响应' }}</h1>
-      <p>{{ connectionError || '请确认这台电脑已连接检修中心局域网，并联系管理员检查服务器是否正在运行。恢复连接后可直接重试，不需要关闭浏览器。' }}</p>
+      <p>{{ connectionError || '请确认当前网络正常，并联系管理员检查交接班服务器是否正在运行。恢复连接后可直接重试，不需要关闭浏览器。' }}</p>
       <el-button type="primary" size="large" class="login-button" :loading="retrying" @click="retryConnection">
         重新连接
       </el-button>
@@ -59,7 +59,7 @@
         </router-link>
         <div class="header-meta">
           <span class="safe-dot" :class="{ offline: !networkOnline }"></span>
-          <span class="safe-text">{{ !networkOnline ? '服务器连接中断' : sessionOptions?.mode === 'server' ? '数据统一保存在服务器' : '数据本地保存' }}</span>
+          <span class="safe-text">{{ !networkOnline ? '服务器连接中断' : sessionOptions?.mode === 'cloud' ? '数据统一保存在云服务器' : sessionOptions?.mode === 'server' ? '数据统一保存在服务器' : '数据本地保存' }}</span>
           <el-dropdown v-if="session?.name" trigger="click" @command="handleUserCommand">
             <button class="user-chip" type="button">{{ session.name }}⌄</button>
             <template #dropdown>
@@ -69,7 +69,7 @@
               </el-dropdown-menu>
             </template>
           </el-dropdown>
-          <span class="version">V0.4.1 生产加固测试版</span>
+          <span class="version">V0.5.0 云端部署测试版</span>
         </div>
       </div>
     </el-header>

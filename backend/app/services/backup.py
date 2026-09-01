@@ -14,6 +14,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -28,7 +29,7 @@ from app.models import now_iso
 
 
 BACKUP_FORMAT = 2
-BACKUP_VERSION = "0.4.1"
+BACKUP_VERSION = config.APP_VERSION
 FULL_BACKUP_DIRNAME = "full_backups"
 RESTORE_DIRNAME = "restore"
 
@@ -656,7 +657,11 @@ def schedule_restore(backup_id: str, *, requested_by: str) -> dict:
         "bundle_sha256": verified["bundle_sha256"],
         "requested_by": requested_by,
         "requested_at": now_iso(),
-        "instruction": "请在服务器控制器中点击“重启服务器”，恢复会在 Web 服务启动前执行。",
+        "instruction": (
+            "请在宝塔终端执行 docker compose restart app，恢复会在 Web 服务启动前执行。"
+            if config.APP_MODE == "cloud"
+            else "请在服务器控制器中点击“重启服务器”，恢复会在 Web 服务启动前执行。"
+        ),
     }
     _write_json_atomic(marker, request)
     return request
@@ -708,9 +713,16 @@ def _rewrite_snapshot_paths(database: Path) -> int:
         for path in generated_files:
             by_name.setdefault(path.name.lower(), []).append(path)
         for snapshot_id, old_text in rows:
-            old_path = Path(str(old_text or ""))
+            old_value = str(old_text or "")
+            # A Windows backup restored on Linux still contains backslashes;
+            # pathlib on Linux treats them as ordinary characters.  Split both
+            # separator styles so historical Word links survive the migration.
+            normalized_parts = [
+                part for part in re.split(r"[\\/]+", old_value) if part
+            ]
+            old_path = Path(*normalized_parts) if normalized_parts else Path("")
             candidate: Path | None = None
-            parts = list(old_path.parts)
+            parts = list(normalized_parts)
             index = next(
                 (i for i, part in enumerate(parts) if part.lower() == "generated"),
                 None,
@@ -721,10 +733,11 @@ def _rewrite_snapshot_paths(database: Path) -> int:
                 if mapped.is_file():
                     candidate = mapped
             if candidate is None:
-                matches = by_name.get(old_path.name.lower(), [])
+                filename = parts[-1] if parts else old_path.name
+                matches = by_name.get(filename.lower(), [])
                 if len(matches) == 1:
                     candidate = matches[0]
-            if candidate is not None and str(candidate) != str(old_text):
+            if candidate is not None and str(candidate) != old_value:
                 connection.execute(
                     "UPDATE document_snapshots SET docx_path=? WHERE id=?",
                     (str(candidate), snapshot_id),
@@ -852,7 +865,7 @@ def create_database_backup(*, reason: str = "manual") -> dict:
     local_dir = config.SNAPSHOT_DIR / "database_backups"
     local_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    final_path = local_dir / f"handover_v0.4.1_{reason}_{stamp}.db"
+    final_path = local_dir / f"handover_v{config.APP_VERSION}_{reason}_{stamp}.db"
     details = _online_database_copy(final_path)
     manifest = {
         "created_at": now_iso(),

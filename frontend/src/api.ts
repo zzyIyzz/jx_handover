@@ -28,7 +28,7 @@ http.interceptors.response.use(
 )
 
 export interface SessionOptions {
-  auth_required: boolean; access_code_required: boolean; mode: 'desktop' | 'server'; staff_names: string[]
+  auth_required: boolean; access_code_required: boolean; mode: 'desktop' | 'server' | 'cloud'; staff_names: string[]
 }
 export interface SessionState {
   authenticated: boolean; name?: string; role?: 'admin' | 'operator'; staff_id?: number
@@ -70,7 +70,7 @@ export interface NasTestView {
   latency_ms: number | null; message: string
 }
 export interface DiagnosticsView {
-  checked_at: string; service_identity: string; public_url: string; data_root: string
+  checked_at: string; mode: 'desktop' | 'server' | 'cloud'; service_identity: string; public_url: string; data_root: string
   database_path: string; database_size: number; database_check: string
   disk_total: number; disk_used: number; disk_free: number; disk_free_percent: number
   recent_users: number; backup: BackupStatusView; restore: RestoreStateView

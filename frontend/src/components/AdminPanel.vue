@@ -12,7 +12,7 @@
       <div>
         <span class="admin-kicker">仅管理员可见</span>
         <h3>运行状态、完整备份与恢复中心</h3>
-        <p>数据库始终在服务器本地运行；共享盘只接收已完成并通过校验的备份包。</p>
+        <p>{{ isCloud ? '数据库始终在 ECS 本地数据盘运行；私有 OSS 只接收已校验完整备份。' : '数据库始终在服务器本地运行；共享盘只接收已完成并通过校验的备份包。' }}</p>
       </div>
       <el-button :loading="loading" @click="loadAdminData">刷新全部状态</el-button>
     </div>
@@ -35,7 +35,7 @@
     >
       <template #default>
         <div class="restore-alert-copy">
-          <span>备份 {{ shortId(restoreState.pending.backup_id) }} 已完成全量校验。请到服务器控制器点击“重启服务器”；系统会先备份当前数据，再执行恢复。</span>
+          <span>备份 {{ shortId(restoreState.pending.backup_id) }} 已完成全量校验。{{ restartInstruction }}</span>
           <el-button type="warning" link :loading="cancellingRestore" @click="cancelRestore">取消待恢复</el-button>
         </div>
       </template>
@@ -109,7 +109,7 @@
           <div><h4>完整业务备份</h4><p>一次备份数据库、导入原件和历史 Word，并生成独立校验清单。</p></div>
         </div>
         <div class="backup-note">
-          本地备份完成并通过 ZIP、SHA256、SQLite 三重校验后，才会尝试复制到共享盘；NAS 断开不影响业务。
+          {{ isCloud ? '本地备份完成并通过 ZIP、SHA256、SQLite 三重校验后，由 ECS 计划任务上传私有 OSS；OSS 暂时不可用不影响业务。' : '本地备份完成并通过 ZIP、SHA256、SQLite 三重校验后，才会尝试复制到共享盘；NAS 断开不影响业务。' }}
         </div>
         <el-button type="primary" plain :loading="backingUp" @click="backupNow">立即创建完整备份</el-button>
         <template v-if="backupResult">
@@ -118,7 +118,7 @@
             <span>{{ backupResult.bundle_file }} · {{ formatBytes(backupResult.bundle_size) }} · {{ backupResult.file_count }} 个文件</span>
             <span v-if="backupResult.nas_state === 'synced'">共享盘副本已复制并校验完成</span>
             <span v-else-if="backupResult.nas_error" class="backup-warning">共享盘暂未同步：{{ backupResult.nas_error }}</span>
-            <span v-else>当前未配置共享盘，完整备份已安全保留在服务器本地。</span>
+            <span v-else>{{ isCloud ? '完整备份已安全保留在 ECS 本地；OSS 上传由宿主机计划任务完成。' : '当前未配置共享盘，完整备份已安全保留在服务器本地。' }}</span>
           </div>
         </template>
       </section>
@@ -126,22 +126,22 @@
       <section class="admin-card">
         <div class="card-heading">
           <span class="card-icon nas">盘</span>
-          <div><h4>共享盘实际权限</h4><p>由正在运行的服务器进程亲自测试，不沿用控制器登录人的权限。</p></div>
+          <div><h4>{{ isCloud ? 'OSS 异地备份' : '共享盘实际权限' }}</h4><p>{{ isCloud ? '由 ECS RAM 角色和宿主机定时脚本管理，不在应用中保存长期 AccessKey。' : '由正在运行的服务器进程亲自测试，不沿用控制器登录人的权限。' }}</p></div>
         </div>
         <template v-if="diagnostics">
           <dl class="status-list">
-            <div><dt>配置状态</dt><dd>{{ diagnostics.nas.configured ? '已配置' : '未配置' }}</dd></div>
+            <div><dt>配置状态</dt><dd>{{ isCloud ? '宿主机脚本管理' : diagnostics.nas.configured ? '已配置' : '未配置' }}</dd></div>
             <div><dt>待同步备份</dt><dd :class="diagnostics.backup.pending_nas ? 'bad' : 'good'">{{ diagnostics.backup.pending_nas }} 个</dd></div>
             <div><dt>最近本地备份</dt><dd>{{ diagnostics.backup.latest_local_at ? cnDateTime(diagnostics.backup.latest_local_at) : '尚无' }}</dd></div>
-            <div><dt>最近 NAS 同步</dt><dd>{{ diagnostics.backup.latest_nas_at ? cnDateTime(diagnostics.backup.latest_nas_at) : '尚无' }}</dd></div>
+            <div><dt>{{ isCloud ? 'OSS 状态' : '最近 NAS 同步' }}</dt><dd>{{ isCloud ? '请查看宝塔计划任务日志' : diagnostics.backup.latest_nas_at ? cnDateTime(diagnostics.backup.latest_nas_at) : '尚无' }}</dd></div>
           </dl>
         </template>
-        <div class="button-row">
+        <div v-if="!isCloud" class="button-row">
           <el-button plain :loading="testingNas" @click="testNas">以服务身份测试</el-button>
           <el-button plain :loading="syncingPending" :disabled="!diagnostics?.nas.configured" @click="syncPending">重试待同步</el-button>
         </div>
         <el-alert
-          v-if="nasTestResult"
+          v-if="!isCloud && nasTestResult"
           :title="nasTestResult.ok ? `共享盘读写正常（${nasTestResult.latency_ms} ms）` : nasTestResult.message"
           :description="`测试身份：${nasTestResult.identity}`"
           :type="nasTestResult.ok ? 'success' : 'warning'"
@@ -177,7 +177,7 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="共享盘" min-width="145" align="center">
+        <el-table-column :label="isCloud ? '异地副本' : '共享盘'" min-width="145" align="center">
           <template #default="{ row }">
             <el-tag :type="nasTagType(row.nas_state)" size="small">
               {{ nasStateLabel(row.nas_state) }}
@@ -225,7 +225,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   api, cnDateTime, type AiAdminStatus, type AiConnectionResult,
@@ -252,6 +252,11 @@ const restoreState = ref<RestoreStateView | null>(null)
 const auditRows = ref<AuditEventView[]>([])
 const backupRows = ref<BackupItem[]>([])
 const backupResult = ref<BackupResult | null>(null)
+const isCloud = computed(() => diagnostics.value?.mode === 'cloud')
+const restartInstruction = computed(() => restoreState.value?.pending?.instruction
+  || (isCloud.value
+    ? '请联系管理员重启云端应用；系统会先备份当前数据，再执行恢复。'
+    : '请到服务器控制器点击“重启服务器”；系统会先备份当前数据，再执行恢复。'))
 
 async function loadAdminData() {
   loading.value = true
@@ -305,7 +310,9 @@ async function backupNow() {
   try {
     backupResult.value = await api.adminBackup()
     if (backupResult.value.nas_state === 'pending') ElMessage.warning('本地完整备份成功；共享盘暂不可用，已加入待同步队列。')
-    else ElMessage.success('数据库、导入原件和历史 Word 已完成备份与校验')
+    else ElMessage.success(isCloud.value
+      ? '数据库、导入原件和历史 Word 已完成本地备份；OSS 将由计划任务同步'
+      : '数据库、导入原件和历史 Word 已完成备份与校验')
     await refreshSafetyData()
     await loadAuditOnly()
   } catch (error: any) {
@@ -384,9 +391,11 @@ async function prepareRestore(row: BackupItem) {
   }
   busyBackupId.value = `${row.backup_id}:restore`
   try {
-    await api.adminPrepareRestore(row.backup_id)
+    const request = await api.adminPrepareRestore(row.backup_id)
     await refreshSafetyData()
-    ElMessage.warning('恢复任务已安排。请到服务器控制器点击“重启服务器”。')
+    ElMessage.warning(request.instruction || (isCloud.value
+      ? '恢复任务已安排。请联系管理员重启云端应用。'
+      : '恢复任务已安排。请到服务器控制器点击“重启服务器”。'))
   } catch (error: any) {
     ElMessage.error(error?.response?.data?.detail || error?.message || '无法安排恢复')
   } finally {
@@ -432,6 +441,7 @@ function reasonLabel(reason: string) {
 }
 
 function nasStateLabel(state: string) {
+  if (isCloud.value && state === 'not_configured') return '宿主机管理'
   return state === 'synced' ? '已校验同步'
     : state === 'pending' ? '等待重试'
       : state === 'not_configured' ? '未配置' : '未知'
@@ -444,7 +454,7 @@ function nasTagType(state: string): 'success' | 'warning' | 'info' | 'danger' {
 function auditAction(method: string, path: string) {
   const operation: Record<string, string> = { POST: '新增/执行', PATCH: '修改', DELETE: '删除', PUT: '更新' }
   const area = path.includes('/restore') ? '恢复任务'
-    : path.includes('/backups') || path.includes('/backup') ? '备份与共享盘'
+    : path.includes('/backups') || path.includes('/backup') ? (isCloud.value ? '备份与 OSS' : '备份与共享盘')
       : path.includes('/render') ? '生成 Word'
         : path.includes('/imports/') ? '导入数据'
           : path.includes('/handover-items') || path.includes('/items') ? '交接事项'

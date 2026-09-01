@@ -338,6 +338,9 @@ def apply_server_environment(
     if settings is None or secrets_value is None:
         settings, secrets_value = load_server_settings()
     data_root = validate_local_data_root(configured_data_root(settings), create=True)
+    # Keep the historical V0.4.1 Windows package self-consistent when this
+    # branch also contains the separate V0.5.0 cloud deployment profile.
+    os.environ["JX_APP_VERSION"] = APP_VERSION
     os.environ["JX_HANDOVER_MODE"] = "server"
     os.environ["JX_HANDOVER_DATA_DIR"] = str(data_root)
     os.environ["JX_PUBLIC_HOST"] = str(settings.get("public_host") or "").strip()

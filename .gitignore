@@ -17,6 +17,9 @@ release/
 .env
 .env.local
 .env.*.local
+deploy/cloud/.env
+deploy/cloud/oss-backup.env
+deploy/cloud/ossutilconfig
 
 # --- 运行时数据（数据库/生成物/导入快照）---
 runtime/data/

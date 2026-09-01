@@ -1,0 +1,6 @@
+[default]
+# 推荐 ECS 开启 IMDSv2，并给实例绑定只有目标前缀读写权限的 RAM 角色。
+# 不在服务器保存长期 AccessKey。
+mode = Ali-EcsRamRole
+ecsRoleName = JXHandoverOssBackupRole
+region = cn-hangzhou

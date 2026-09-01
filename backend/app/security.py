@@ -8,6 +8,7 @@ to browsers.
 from __future__ import annotations
 
 import base64
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -18,6 +19,8 @@ from pathlib import Path
 import re
 import secrets
 import subprocess
+import threading
+import time
 
 from fastapi import Depends, HTTPException, Request
 from sqlalchemy.orm import Session
@@ -28,6 +31,97 @@ from app.models import Staff
 
 
 COOKIE_NAME = "jx_handover_session"
+
+
+class LoginAttemptLimiter:
+    """Small per-client limiter suitable for the required single process."""
+
+    def __init__(
+        self,
+        *,
+        max_failures: int,
+        window_seconds: int,
+        block_seconds: int,
+    ) -> None:
+        self.max_failures = max(1, max_failures)
+        self.window_seconds = max(1, window_seconds)
+        self.block_seconds = max(1, block_seconds)
+        self._failures: dict[str, deque[float]] = {}
+        self._blocked_until: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def retry_after(self, client_key: str, *, now: float | None = None) -> int:
+        current = time.monotonic() if now is None else now
+        with self._lock:
+            until = self._blocked_until.get(client_key, 0.0)
+            if until <= current:
+                self._blocked_until.pop(client_key, None)
+                return 0
+            return max(1, int(until - current + 0.999))
+
+    def record_failure(self, client_key: str, *, now: float | None = None) -> int:
+        current = time.monotonic() if now is None else now
+        with self._lock:
+            failures = self._failures.setdefault(client_key, deque())
+            cutoff = current - self.window_seconds
+            while failures and failures[0] < cutoff:
+                failures.popleft()
+            failures.append(current)
+            if len(failures) < self.max_failures:
+                return 0
+            self._failures.pop(client_key, None)
+            blocked_until = current + self.block_seconds
+            self._blocked_until[client_key] = blocked_until
+            return self.block_seconds
+
+    def record_success(self, client_key: str) -> None:
+        with self._lock:
+            self._failures.pop(client_key, None)
+            self._blocked_until.pop(client_key, None)
+
+
+LOGIN_ATTEMPTS = LoginAttemptLimiter(
+    max_failures=config.LOGIN_MAX_FAILURES,
+    window_seconds=config.LOGIN_WINDOW_SECONDS,
+    block_seconds=config.LOGIN_BLOCK_SECONDS,
+)
+LOGIN_NETWORK_ATTEMPTS = LoginAttemptLimiter(
+    max_failures=config.LOGIN_NETWORK_MAX_FAILURES,
+    window_seconds=config.LOGIN_WINDOW_SECONDS,
+    block_seconds=config.LOGIN_BLOCK_SECONDS,
+)
+
+
+def _login_client_key(request: Request) -> str:
+    return (request.client.host if request.client else "unknown")[:100]
+
+
+def assert_login_allowed(request: Request, name: str) -> tuple[str, str]:
+    network_key = _login_client_key(request)
+    identity_key = f"{network_key}|{name.strip().casefold()[:100]}"
+    retry_after = max(
+        LOGIN_ATTEMPTS.retry_after(identity_key),
+        LOGIN_NETWORK_ATTEMPTS.retry_after(network_key),
+    )
+    if retry_after:
+        raise HTTPException(
+            status_code=429,
+            detail="登录失败次数过多，请稍后再试。",
+            headers={"Retry-After": str(retry_after)},
+        )
+    return identity_key, network_key
+
+
+def record_login_failure(keys: tuple[str, str]) -> None:
+    identity_key, network_key = keys
+    LOGIN_ATTEMPTS.record_failure(identity_key)
+    LOGIN_NETWORK_ATTEMPTS.record_failure(network_key)
+
+
+def record_login_success(keys: tuple[str, str]) -> None:
+    identity_key, network_key = keys
+    LOGIN_ATTEMPTS.record_success(identity_key)
+    LOGIN_NETWORK_ATTEMPTS.record_success(network_key)
 
 
 @dataclass(frozen=True)
