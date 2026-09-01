@@ -9,11 +9,24 @@ fi
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cloud_dir="$(cd -- "${script_dir}/.." && pwd)"
 env_file="${cloud_dir}/.env"
+profile="${1:---domain}"
+case "${profile}" in
+  --domain)
+    env_template="${cloud_dir}/.env.example"
+    ;;
+  --ip)
+    env_template="${cloud_dir}/.env.ip.example"
+    ;;
+  *)
+    echo "用法：sudo bash deploy/cloud/scripts/prepare-host.sh [--domain|--ip]" >&2
+    exit 1
+    ;;
+esac
 
 if [[ ! -f "${env_file}" ]]; then
-  cp -- "${cloud_dir}/.env.example" "${env_file}"
+  cp -- "${env_template}" "${env_file}"
   chmod 0600 "${env_file}"
-  echo "已创建 ${env_file}，请先填写域名、访问口令、会话密钥、管理员和 Qwen Key。"
+  echo "已按 ${profile} 模板创建 ${env_file}，请先填写实际 HTTPS 地址、访问口令、会话密钥、管理员和 Qwen Key。"
 else
   chmod 0600 "${env_file}"
   echo "保留已有 ${env_file}，没有覆盖。"

@@ -1,7 +1,8 @@
 """Global configuration shared by desktop, LAN-server and cloud packages.
 
-Port 8765 stays fixed, but the bind address and security requirements depend
-on one of three explicit operating modes:
+The existing Windows desktop/LAN packages keep port 8765.  The cloud profile
+uses the separately fixed internal port 1215 behind HTTPS port 443.  Bind
+address and security requirements depend on one of three explicit modes:
 
 ``desktop``
     Listen on loopback and keep data in the current user's LocalAppData.
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import os
 import sys
+from ipaddress import ip_address
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -61,13 +63,14 @@ configured_env_file = os.getenv("JX_HANDOVER_CONFIG_FILE", "").strip()
 if configured_env_file:
     load_dotenv(Path(configured_env_file).expanduser(), override=True)
 
-# Port 8765 is intentionally fixed in every mode.  Cloud mode publishes it
-# only to the ECS loopback interface; BaoTa/Nginx owns public HTTPS port 443.
+# Preserve the released Windows packages on 8765 while the cloud deployment
+# uses the user-selected internal port 1215.  Neither value is user-facing in
+# cloud mode because BaoTa/Nginx owns public HTTPS port 443.
 APP_MODE = os.getenv("JX_HANDOVER_MODE", "desktop").strip().lower()
 if APP_MODE not in {"desktop", "server", "cloud"}:
     APP_MODE = "desktop"
 APP_HOST = "0.0.0.0" if APP_MODE in {"server", "cloud"} else "127.0.0.1"
-APP_PORT = 8765
+APP_PORT = 1215 if APP_MODE == "cloud" else 8765
 PUBLIC_HOST = os.getenv("JX_PUBLIC_HOST", "").strip()
 _explicit_public_url = os.getenv("JX_PUBLIC_URL", "").strip().rstrip("/")
 PUBLIC_URL = _explicit_public_url or (
@@ -196,7 +199,9 @@ def validate_runtime_configuration() -> None:
         or parsed.fragment
         or parsed.path not in {"", "/"}
     ):
-        problems.append("JX_PUBLIC_URL 必须是无路径的 HTTPS 域名，例如 https://handover.example.com。")
+        problems.append(
+            "JX_PUBLIC_URL 必须是无路径的 HTTPS 地址，例如 https://handover.example.com 或 https://公网IPv4。"
+        )
     if not AUTH_REQUIRED:
         problems.append("JX_AUTH_REQUIRED 必须为 1。")
     if len(ACCESS_CODE) < 12:
@@ -227,6 +232,17 @@ def validate_runtime_configuration() -> None:
         problems.append("JX_TRUSTED_HOSTS 必须包含 JX_PUBLIC_URL 的域名。")
     if parsed.hostname and parsed.hostname.lower() == "handover.example.com":
         problems.append("JX_PUBLIC_URL 仍是示例域名，请替换为实际 HTTPS 域名。")
+    if parsed.hostname:
+        try:
+            public_address = ip_address(parsed.hostname)
+        except ValueError:
+            public_address = None
+        if public_address is not None and (
+            public_address.version != 4 or not public_address.is_global
+        ):
+            problems.append(
+                "使用 IP 访问时，JX_PUBLIC_URL 必须填写 ECS 的真实公网 IPv4，不能使用示例、内网或保留地址。"
+            )
     if Path(USER_DATA_ROOT).resolve() == Path(Path(USER_DATA_ROOT).anchor):
         problems.append("JX_HANDOVER_DATA_DIR 不能使用文件系统根目录。")
     if not DATABASE_URL.startswith("sqlite:///"):

@@ -113,6 +113,7 @@ with TestClient(app, base_url="https://handover.example.test") as client:
         self.assertEqual(result["health"]["status"], "ok")
         self.assertEqual(result["health"]["version"], "0.5.0")
         self.assertEqual(result["health"]["mode"], "cloud")
+        self.assertEqual(result["health"]["port"], 1215)
         self.assertNotIn("data_root", result["health"])
         self.assertNotIn("public_url", result["health"])
         self.assertIn("max-age=31536000", result["hsts"])
@@ -152,7 +153,7 @@ else:
             })
             error = self._run(script, env)["error"]
 
-        self.assertIn("HTTPS 域名", error)
+        self.assertIn("HTTPS 地址", error)
         self.assertIn("JX_AUTH_REQUIRED", error)
         self.assertIn("至少需要 12", error)
         self.assertIn("至少需要 32", error)
@@ -187,6 +188,27 @@ else:
         self.assertIn("示例占位文字，请生成真实随机口令", error)
         self.assertIn("示例占位文字，请生成真实随机密钥", error)
         self.assertIn("示例占位文字，请填写实际管理员", error)
+
+    def test_example_or_private_ip_cannot_start_cloud_service(self):
+        script = r'''
+import json
+from app import config
+try:
+    config.validate_runtime_configuration()
+except RuntimeError as exc:
+    print(json.dumps({"error": str(exc)}, ensure_ascii=False))
+else:
+    print(json.dumps({"error": ""}, ensure_ascii=False))
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            for address in ("203.0.113.20", "192.168.14.52"):
+                env = self._environment(tmp)
+                env.update({
+                    "JX_PUBLIC_URL": f"https://{address}",
+                    "JX_TRUSTED_HOSTS": f"{address},127.0.0.1,localhost",
+                })
+                error = self._run(script, env)["error"]
+                self.assertIn("真实公网 IPv4", error)
 
 
 class CloudSecurityUnitTest(unittest.TestCase):
@@ -252,8 +274,9 @@ class CloudSecurityUnitTest(unittest.TestCase):
         entrypoint = (
             PROJECT_ROOT / "deploy" / "cloud" / "docker-entrypoint.sh"
         ).read_text(encoding="utf-8")
-        self.assertIn('"127.0.0.1:8765:8765"', compose)
-        self.assertNotIn('"8765:8765"', compose)
+        self.assertIn('"127.0.0.1:1215:1215"', compose)
+        self.assertNotIn('"1215:1215"', compose)
+        self.assertNotIn("8765", compose)
         self.assertIn("read_only: true", compose)
         self.assertIn("no-new-privileges:true", compose)
         self.assertIn("USER 10001:10001", dockerfile)
@@ -272,6 +295,43 @@ class CloudSecurityUnitTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("正式数据目录不存在", deploy_script)
         self.assertIn("prepare-host.sh", deploy_script)
+        self.assertIn("1215 端口已被其他程序占用", deploy_script)
+        self.assertIn("http://127.0.0.1:1215/api/health", deploy_script)
+
+        prepare_script = (
+            PROJECT_ROOT / "deploy" / "cloud" / "scripts" / "prepare-host.sh"
+        ).read_text(encoding="utf-8")
+        certificate_script = (
+            PROJECT_ROOT
+            / "deploy"
+            / "cloud"
+            / "scripts"
+            / "install-ip-certificate.sh"
+        ).read_text(encoding="utf-8")
+        nginx_configure_script = (
+            PROJECT_ROOT
+            / "deploy"
+            / "cloud"
+            / "scripts"
+            / "configure-ip-nginx.sh"
+        ).read_text(encoding="utf-8")
+        ip_nginx = (
+            PROJECT_ROOT
+            / "deploy"
+            / "cloud"
+            / "nginx"
+            / "jx-handover-ip-server.conf.example"
+        ).read_text(encoding="utf-8")
+        self.assertIn("--ip", prepare_script)
+        self.assertIn(".env.ip.example", prepare_script)
+        self.assertIn("--cert-profile shortlived", certificate_script)
+        self.assertIn("--install-cronjob", certificate_script)
+        self.assertIn("acme.sh.*--cron", certificate_script)
+        self.assertIn("before-jx-", nginx_configure_script)
+        self.assertIn("已恢复原宝塔配置", nginx_configure_script)
+        self.assertIn("127.0.0.1:1215", nginx_configure_script)
+        self.assertIn("proxy_pass http://127.0.0.1:1215", ip_nginx)
+        self.assertNotIn("8765", ip_nginx)
 
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ services:
         source: ${JX_HOST_DATA_DIR:-/www/jx-handover/data}
         target: /var/lib/jx-handover
     ports:
-      - "127.0.0.1:8765:8765"
+      - "127.0.0.1:1215:1215"
     read_only: true
     tmpfs:
       - /tmp:size=536870912,mode=1777
@@ -32,7 +32,7 @@ services:
         - CMD
         - python
         - -c
-        - "import os, urllib.parse, urllib.request; public = urllib.parse.urlsplit(os.environ['JX_PUBLIC_URL']); request = urllib.request.Request('http://127.0.0.1:8765/api/health', headers={'Host': public.netloc}); urllib.request.urlopen(request, timeout=5).read()"
+        - "import os, urllib.parse, urllib.request; public = urllib.parse.urlsplit(os.environ['JX_PUBLIC_URL']); request = urllib.request.Request('http://127.0.0.1:1215/api/health', headers={'Host': public.netloc}); urllib.request.urlopen(request, timeout=5).read()"
       interval: 30s
       timeout: 8s
       retries: 3
