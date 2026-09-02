@@ -1,4 +1,4 @@
-# 江西片区智能交接班 V0.5.0 无域名公网 IP 部署说明
+# 江西片区智能交接班 V0.5.1 无域名公网 IP 部署说明
 
 ## 1. 适用范围
 
@@ -20,7 +20,7 @@ Let’s Encrypt 公网 IP 证书是约 6 天有效的短期证书，必须依赖
 1. 公网 IPv4 必须是 ECS 当前固定 EIP；不要使用内网 IP、NAS 地址或会变化的临时地址。
 2. 阿里云安全组和宝塔“安全/系统防火墙”都只向批准来源开放 TCP 1215；绝不开放内部 TCP 8765。
 3. TCP 80 必须长期允许 ACME HTTP-01 校验，否则约 6 天后证书会失效。
-4. TCP 1215 第一轮只允许部署管理员当前网络的公网出口 IPv4；共享口令不能直接暴露给任意公网来源。
+4. TCP 1215 第一轮只允许部署管理员当前网络的公网出口 IPv4；个人姓名密码已经启用，但在没有 MFA 和公网开放验收前仍不能向任意来源开放。
 
 建议安全组：
 
@@ -43,7 +43,7 @@ mkdir -p /www/jx-handover
 cd /www/jx-handover
 git clone git@github.com:zzyIyzz/jx_handover.git app
 cd app
-git switch codex/v0.5.0-aliyun-baota
+git switch codex/v0.5.1-account-login
 ```
 
 最终必须直接存在：
@@ -111,7 +111,11 @@ sudo bash deploy/cloud/scripts/prepare-host.sh --ip
 JX_HOST_DATA_DIR=/www/jx-handover/data
 JX_PUBLIC_URL=https://你的真实公网IPv4:1215
 JX_TRUSTED_HOSTS=你的真实公网IPv4,127.0.0.1,localhost
-JX_ACCESS_CODE=至少12位随机访问口令
+JX_AUTH_REQUIRED=1
+JX_COOKIE_SECURE=1
+JX_ACCOUNT_LOGIN_ENABLED=1
+JX_INITIAL_ACCOUNT_PASSWORD=aaaa0000*
+JX_ACCESS_CODE=
 JX_SESSION_SECRET=至少32位随机会话密钥
 JX_ADMIN_NAMES=实际管理员姓名
 QWEN_API_KEY=你自己的DashScope_API_Key
@@ -120,11 +124,10 @@ QWEN_API_KEY=你自己的DashScope_API_Key
 生成随机值：
 
 ```bash
-openssl rand -base64 24
 openssl rand -hex 32
 ```
 
-不要发送或提交 `.env`。程序会拒绝示例 `203.0.113.20`、内网地址、示例口令、示例会话密钥和示例管理员。
+只需生成会话签名密钥；人员第一次登录统一使用 `aaaa0000*`，随后页面会强制改成至少 12 个字符的个人密码。`JX_ADMIN_NAMES` 必须是人员名单中准确且唯一的姓名，正式试用建议配置两名管理员。不要发送或提交 `.env`。程序会拒绝示例 `203.0.113.20`、内网地址、关闭个人账号模式、示例会话密钥和示例管理员；启动后还会拒绝同名启用人员。唯一管理员忘记密码时，按[完整部署说明](阿里云宝塔部署说明_V0.5.1.md)中的本机命令行方式应急重置。
 
 保存后再次准备数据目录：
 
@@ -156,7 +159,7 @@ ss -lntp | grep 8765
 curl -H 'Host: 你的真实公网IPv4:1215' http://127.0.0.1:8765/api/health
 ```
 
-应返回 `status: ok`、`version: 0.5.0`、`mode: cloud`、内部 `port: 8765` 和 `public_port: 1215`。
+应返回 `status: ok`、`version: 0.5.1`、`mode: cloud`、`login_mode: account`、内部 `port: 8765` 和 `public_port: 1215`。
 
 ## 8. 申请并安装公网 IP 证书
 
@@ -216,7 +219,9 @@ https://ECS公网IPv4:1215
 
 - 浏览器证书可信，不显示自签名警告；
 - 能显示人员登录页；
-- 登录后能打开班次页面；
+- 账号输入本人准确姓名，初始密码为 `aaaa0000*`；首次登录必须先设置至少 12 个字符的个人密码；
+- 改密后才能打开班次页面，初始密码不再可用；
+- 每个人都使用自己的账号，不共享新密码；管理员可在系统管理页安全重置其他人员密码；
 - 地址栏明确使用 `:1215`，并且不出现内部端口 `:8765`；
 - 首次直接访问 `http://ECS公网IPv4` 时会跳转到 HTTPS 1215。
 

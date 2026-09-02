@@ -2,7 +2,7 @@ name: jx-handover
 
 services:
   app:
-    image: jx-handover:0.5.0
+    image: jx-handover:0.5.1
     build:
       context: ../..
       dockerfile: deploy/cloud/Dockerfile

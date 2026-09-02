@@ -16,6 +16,8 @@ hidden_imports = (
     collect_submodules("app")
     + collect_submodules("uvicorn")
     + collect_submodules("openpyxl")
+    + collect_submodules("pwdlib")
+    + collect_submodules("argon2")
     + ["sqlalchemy.dialects.sqlite"]
 )
 data_files = [

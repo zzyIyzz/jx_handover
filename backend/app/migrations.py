@@ -1,4 +1,4 @@
-"""SQLite schema migration and safety backup through v0.4.0.
+"""SQLite schema migrations with an integrity-checked safety backup.
 
 The application deliberately keeps migration logic small and idempotent.  It
 never rewrites document snapshots; only missing columns/tables are added.
@@ -61,6 +61,21 @@ def _needs_v040_migration(target_engine: Engine) -> bool:
     return "audit_events" not in tables
 
 
+def _needs_account_migration(target_engine: Engine) -> bool:
+    inspector = inspect(target_engine)
+    tables = set(inspector.get_table_names())
+    if not tables or "staff" not in tables:
+        return False
+    columns = {column["name"] for column in inspector.get_columns("staff")}
+    return not {
+        "password_hash",
+        "must_change_password",
+        "session_version",
+        "password_updated_at",
+        "last_login_at",
+    }.issubset(columns)
+
+
 def _backup_database(target_engine: Engine, backup_dir: Path) -> Path | None:
     database_path = _sqlite_path(target_engine)
     if database_path is None or not database_path.exists() or database_path.stat().st_size == 0:
@@ -104,7 +119,8 @@ def migrate_database(
     backup = None
     changed: list[str] = []
     if (_needs_v030_migration(target_engine)
-            or _needs_v040_migration(target_engine)):
+            or _needs_v040_migration(target_engine)
+            or _needs_account_migration(target_engine)):
         backup = _backup_database(
             target_engine,
             backup_dir or (config.SNAPSHOT_DIR / "database_backups"),
@@ -196,6 +212,37 @@ def migrate_database(
                     "ADD COLUMN ai_usage_json TEXT NOT NULL DEFAULT '{}'"
                 ))
                 changed.append("section_import_previews.ai_usage_json")
+
+        if "staff" in tables:
+            columns = {column["name"] for column in inspector.get_columns("staff")}
+            if "password_hash" not in columns:
+                connection.execute(text(
+                    "ALTER TABLE staff "
+                    "ADD COLUMN password_hash TEXT NOT NULL DEFAULT ''"
+                ))
+                changed.append("staff.password_hash")
+            if "must_change_password" not in columns:
+                connection.execute(text(
+                    "ALTER TABLE staff "
+                    "ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 1"
+                ))
+                changed.append("staff.must_change_password")
+            if "session_version" not in columns:
+                connection.execute(text(
+                    "ALTER TABLE staff "
+                    "ADD COLUMN session_version INTEGER NOT NULL DEFAULT 1"
+                ))
+                changed.append("staff.session_version")
+            if "password_updated_at" not in columns:
+                connection.execute(text(
+                    "ALTER TABLE staff ADD COLUMN password_updated_at TEXT"
+                ))
+                changed.append("staff.password_updated_at")
+            if "last_login_at" not in columns:
+                connection.execute(text(
+                    "ALTER TABLE staff ADD COLUMN last_login_at TEXT"
+                ))
+                changed.append("staff.last_login_at")
 
     # SQLAlchemy creates only missing tables/indexes and leaves historical rows,
     # document snapshots and generated Word files untouched.

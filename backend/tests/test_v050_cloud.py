@@ -1,4 +1,4 @@
-"""V0.5.0 cloud security, container contract and cross-platform tests."""
+"""V0.5.x cloud security, container contract and cross-platform tests."""
 from __future__ import annotations
 
 import json
@@ -36,7 +36,9 @@ class CloudProcessProbe(unittest.TestCase):
             "JX_CLOUD_ACCESS_SCOPE": "private",
             "JX_AUTH_REQUIRED": "1",
             "JX_COOKIE_SECURE": "1",
-            "JX_ACCESS_CODE": "cloud-test-code-2026",
+            "JX_ACCOUNT_LOGIN_ENABLED": "1",
+            "JX_INITIAL_ACCOUNT_PASSWORD": "aaaa0000*",
+            "JX_ACCESS_CODE": "",
             "JX_SESSION_SECRET": "s" * 48,
             "JX_ADMIN_NAMES": "测试管理员",
             "JX_SESSION_TTL_HOURS": "12",
@@ -64,28 +66,38 @@ from app import config
 config.validate_runtime_configuration()
 from app.main import app
 from app.db import SessionLocal
+from app.migrations import initialize_database
 from app.models import Staff
+from app.security import hash_password
+initialize_database()
+db = SessionLocal()
+db.add(Staff(
+    station_code="TEST",
+    name="测试管理员",
+    role="测试角色",
+    note="",
+    password_hash=hash_password("Cloud-test-password-2026!"),
+    must_change_password=0,
+))
+db.commit()
+db.close()
 with TestClient(app, base_url="https://handover.example.test:1215") as client:
-    db = SessionLocal()
-    if db.query(Staff).filter(Staff.name == "测试管理员").first() is None:
-        db.add(Staff(station_code="TEST", name="测试管理员", role="测试角色", note=""))
-        db.commit()
-    db.close()
     health = client.get("/api/health")
+    options = client.get("/api/session/options")
     foreign = client.post(
         "/api/session/login",
         headers={"Origin": "https://lookalike.example.test:1215"},
-        json={"name": "测试管理员", "access_code": "cloud-test-code-2026"},
+        json={"name": "测试管理员", "password": "Cloud-test-password-2026!"},
     )
     missing_public_port = client.post(
         "/api/session/login",
         headers={"Origin": "https://handover.example.test"},
-        json={"name": "测试管理员", "access_code": "cloud-test-code-2026"},
+        json={"name": "测试管理员", "password": "Cloud-test-password-2026!"},
     )
     login = client.post(
         "/api/session/login",
         headers={"Origin": "https://handover.example.test:1215"},
-        json={"name": "测试管理员", "access_code": "cloud-test-code-2026"},
+        json={"name": "测试管理员", "password": "Cloud-test-password-2026!"},
     )
     protected = client.get("/api/handovers")
     bad_host = client.get("/api/health", headers={"Host": "evil.example.test"})
@@ -97,6 +109,7 @@ with TestClient(app, base_url="https://handover.example.test:1215") as client:
         "cookie_secure": config.COOKIE_SECURE,
         "health_status": health.status_code,
         "health": health.json(),
+        "options": options.json(),
         "hsts": health.headers.get("strict-transport-security", ""),
         "csp": health.headers.get("content-security-policy", ""),
         "foreign_status": foreign.status_code,
@@ -117,12 +130,15 @@ with TestClient(app, base_url="https://handover.example.test:1215") as client:
         self.assertTrue(result["cookie_secure"])
         self.assertEqual(result["health_status"], 200)
         self.assertEqual(result["health"]["status"], "ok")
-        self.assertEqual(result["health"]["version"], "0.5.0")
+        self.assertEqual(result["health"]["version"], "0.5.1")
         self.assertEqual(result["health"]["mode"], "cloud")
         self.assertEqual(result["health"]["port"], 8765)
         self.assertEqual(result["health"]["public_port"], 1215)
+        self.assertEqual(result["health"]["login_mode"], "account")
         self.assertNotIn("data_root", result["health"])
         self.assertNotIn("public_url", result["health"])
+        self.assertEqual(result["options"]["login_mode"], "account")
+        self.assertEqual(result["options"]["staff_names"], [])
         self.assertIn("max-age=31536000", result["hsts"])
         self.assertIn("frame-ancestors 'none'", result["csp"])
         self.assertEqual(result["foreign_status"], 403)
@@ -154,7 +170,7 @@ else:
                 "JX_CLOUD_ACCESS_SCOPE": "public",
                 "JX_AUTH_REQUIRED": "0",
                 "JX_COOKIE_SECURE": "0",
-                "JX_ACCESS_CODE": "short",
+                "JX_INITIAL_ACCOUNT_PASSWORD": "short",
                 "JX_SESSION_SECRET": "short",
                 "JX_ADMIN_NAMES": "",
                 "JX_SESSION_TTL_HOURS": "168",
@@ -163,7 +179,7 @@ else:
 
         self.assertIn("HTTPS 地址", error)
         self.assertIn("JX_AUTH_REQUIRED", error)
-        self.assertIn("至少需要 12", error)
+        self.assertIn("JX_INITIAL_ACCOUNT_PASSWORD 至少需要 8", error)
         self.assertIn("至少需要 32", error)
         self.assertIn("JX_COOKIE_SECURE", error)
         self.assertIn("不能超过 24", error)
@@ -187,12 +203,14 @@ else:
             env.update({
                 "JX_PUBLIC_URL": "https://handover.example.com:1215",
                 "JX_TRUSTED_HOSTS": "handover.example.com,127.0.0.1,localhost",
+                "JX_ACCOUNT_LOGIN_ENABLED": "0",
                 "JX_ACCESS_CODE": "请替换为至少12位的随机访问口令",
                 "JX_SESSION_SECRET": "请替换" * 16,
                 "JX_ADMIN_NAMES": "请填写实际管理员姓名",
             })
             error = self._run(script, env)["error"]
         self.assertIn("示例域名", error)
+        self.assertIn("JX_ACCOUNT_LOGIN_ENABLED 必须为 1", error)
         self.assertIn("示例占位文字，请生成真实随机口令", error)
         self.assertIn("示例占位文字，请生成真实随机密钥", error)
         self.assertIn("示例占位文字，请填写实际管理员", error)

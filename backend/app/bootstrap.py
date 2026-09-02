@@ -6,6 +6,7 @@ import json
 from app.db import SessionLocal
 from app.migrations import initialize_database
 from app.models import Staff, Station, now_iso
+from app.security import initialize_missing_staff_passwords, validate_account_directory
 
 
 SEED_STATIONS = [
@@ -63,11 +64,14 @@ def initialize_application_data() -> dict:
                 ))
                 created_staff += 1
         db.commit()
+        validate_account_directory(db)
+        initialized_accounts = initialize_missing_staff_passwords(db)
     finally:
         db.close()
     return {
         "migration": migration,
         "created_stations": created_stations,
         "created_staff": created_staff,
+        "initialized_accounts": initialized_accounts,
     }
 

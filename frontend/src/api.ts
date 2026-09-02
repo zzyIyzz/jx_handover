@@ -20,7 +20,10 @@ http.interceptors.response.use(
   error => {
     if (error?.response) publishConnectionState(true)
     else publishConnectionState(false)
-    if (error?.response?.status === 401) {
+    if (
+      error?.response?.status === 401
+      && error?.response?.data?.detail?.code === 'LOGIN_REQUIRED'
+    ) {
       window.dispatchEvent(new CustomEvent('jx-session-expired'))
     }
     return Promise.reject(error)
@@ -28,10 +31,17 @@ http.interceptors.response.use(
 )
 
 export interface SessionOptions {
-  auth_required: boolean; access_code_required: boolean; mode: 'desktop' | 'server' | 'cloud'; staff_names: string[]
+  auth_required: boolean; access_code_required: boolean; login_mode: 'account' | 'shared'
+  mode: 'desktop' | 'server' | 'cloud'; staff_names: string[]
 }
 export interface SessionState {
   authenticated: boolean; name?: string; role?: 'admin' | 'operator'; staff_id?: number
+  password_change_required?: boolean
+}
+export interface AccountView {
+  staff_id: number; name: string; station_code: string; staff_role: string
+  account_role: 'admin' | 'operator'; is_active: boolean; password_initialized: boolean
+  must_change_password: boolean; password_updated_at: string | null; last_login_at: string | null
 }
 export interface AiAdminStatus {
   mode: 'qwen' | 'mock' | string; model: string; configured: boolean; base_url: string; key_hint: string
@@ -147,9 +157,16 @@ export interface ImportPreview {
 export const api = {
   sessionOptions: () => http.get<SessionOptions>('/session/options').then(r => r.data),
   sessionMe: () => http.get<SessionState>('/session/me').then(r => r.data),
-  sessionLogin: (name: string, accessCode: string) =>
-    http.post<SessionState>('/session/login', { name, access_code: accessCode }).then(r => r.data),
+  sessionLogin: (name: string, password = '', accessCode = '') =>
+    http.post<SessionState>('/session/login', { name, password, access_code: accessCode }).then(r => r.data),
+  sessionChangePassword: (currentPassword: string, newPassword: string) =>
+    http.post<SessionState>('/session/change-password', {
+      current_password: currentPassword, new_password: newPassword
+    }).then(r => r.data),
   sessionLogout: () => http.post<SessionState>('/session/logout').then(r => r.data),
+  adminAccounts: () => http.get<AccountView[]>('/admin/accounts').then(r => r.data),
+  adminResetPassword: (staffId: number) =>
+    http.post<AccountView>(`/admin/accounts/${staffId}/reset-password`).then(r => r.data),
   adminAiStatus: () => http.get<AiAdminStatus>('/admin/ai').then(r => r.data),
   adminAiTest: () => http.post<AiConnectionResult>('/admin/ai/test', {}, { timeout: 120000 }).then(r => r.data),
   adminAudit: (limit = 30) => http.get<AuditEventView[]>('/admin/audit', { params: { limit } }).then(r => r.data),

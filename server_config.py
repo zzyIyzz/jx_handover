@@ -339,7 +339,7 @@ def apply_server_environment(
         settings, secrets_value = load_server_settings()
     data_root = validate_local_data_root(configured_data_root(settings), create=True)
     # Keep the historical V0.4.1 Windows package self-consistent when this
-    # branch also contains the separate V0.5.0 cloud deployment profile.
+    # branch also contains the separate V0.5.x cloud deployment profile.
     os.environ["JX_APP_VERSION"] = APP_VERSION
     os.environ["JX_HANDOVER_MODE"] = "server"
     os.environ["JX_HANDOVER_DATA_DIR"] = str(data_root)

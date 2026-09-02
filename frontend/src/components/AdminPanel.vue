@@ -152,6 +152,46 @@
       </section>
     </div>
 
+    <section v-if="isCloud" class="account-card">
+      <div class="audit-heading">
+        <div>
+          <h4>人员账号与登录状态</h4>
+          <p>账号就是人员姓名。初始密码只能首次登录使用；重置密码会立即让该人员所有旧登录失效。</p>
+        </div>
+        <el-tag effect="plain">{{ accountRows.length }} 个账号</el-tag>
+      </div>
+      <el-table v-if="accountRows.length" :data="accountRows" max-height="360" size="small" row-key="staff_id">
+        <el-table-column prop="name" label="姓名/账号" min-width="120" />
+        <el-table-column prop="staff_role" label="岗位" min-width="145" />
+        <el-table-column label="权限" width="92" align="center">
+          <template #default="{ row }">
+            <el-tag :type="row.account_role === 'admin' ? 'warning' : 'info'" size="small">
+              {{ row.account_role === 'admin' ? '管理员' : '操作员' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="密码状态" min-width="130" align="center">
+          <template #default="{ row }">
+            <el-tag :type="accountState(row).type" size="small">{{ accountState(row).label }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="最后登录" min-width="165">
+          <template #default="{ row }">{{ row.last_login_at ? cnDateTime(row.last_login_at) : '尚未登录' }}</template>
+        </el-table-column>
+        <el-table-column label="操作" width="160" fixed="right" align="center">
+          <template #default="{ row }">
+            <el-button link type="warning"
+                       :disabled="!row.is_active || row.staff_id === currentStaffId"
+                       :loading="busyAccountId === row.staff_id" @click="resetAccount(row)">
+              {{ row.staff_id === currentStaffId ? '请用右上角改密' : '重置初始密码' }}
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <el-empty v-else-if="!loading" description="暂无人员账号" :image-size="64" />
+      <el-skeleton v-else :rows="4" animated />
+    </section>
+
     <section class="backup-card">
       <div class="audit-heading">
         <div>
@@ -229,11 +269,11 @@ import { computed, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   api, cnDateTime, type AiAdminStatus, type AiConnectionResult,
-  type AuditEventView, type BackupItem, type BackupResult,
+  type AccountView, type AuditEventView, type BackupItem, type BackupResult,
   type DiagnosticsView, type NasTestView, type RestoreStateView
 } from '@/api'
 
-defineProps<{ modelValue: boolean }>()
+defineProps<{ modelValue: boolean; currentStaffId?: number }>()
 const emit = defineEmits<{ 'update:modelValue': [value: boolean] }>()
 
 const loading = ref(false)
@@ -243,6 +283,7 @@ const syncingPending = ref(false)
 const backingUp = ref(false)
 const cancellingRestore = ref(false)
 const busyBackupId = ref('')
+const busyAccountId = ref<number | null>(null)
 const loadError = ref('')
 const aiStatus = ref<AiAdminStatus | null>(null)
 const aiTestResult = ref<AiConnectionResult | null>(null)
@@ -250,6 +291,7 @@ const nasTestResult = ref<NasTestView | null>(null)
 const diagnostics = ref<DiagnosticsView | null>(null)
 const restoreState = ref<RestoreStateView | null>(null)
 const auditRows = ref<AuditEventView[]>([])
+const accountRows = ref<AccountView[]>([])
 const backupRows = ref<BackupItem[]>([])
 const backupResult = ref<BackupResult | null>(null)
 const isCloud = computed(() => diagnostics.value?.mode === 'cloud')
@@ -262,15 +304,16 @@ async function loadAdminData() {
   loading.value = true
   loadError.value = ''
   try {
-    const [status, audit, backups, health, restore] = await Promise.all([
+    const [status, audit, backups, health, restore, accounts] = await Promise.all([
       api.adminAiStatus(), api.adminAudit(30), api.adminBackups(),
-      api.adminDiagnostics(), api.adminRestoreState()
+      api.adminDiagnostics(), api.adminRestoreState(), api.adminAccounts()
     ])
     aiStatus.value = status
     auditRows.value = audit
     backupRows.value = backups
     diagnostics.value = health
     restoreState.value = restore
+    accountRows.value = accounts
   } catch (error: any) {
     if (error?.response?.status === 403) loadError.value = '当前身份没有管理员权限。'
     else loadError.value = error?.response?.data?.detail || '管理信息加载失败，请检查服务器连接。'
@@ -420,6 +463,38 @@ async function loadAuditOnly() {
   try { auditRows.value = await api.adminAudit(30) } catch { /* 主操作结果已经显示 */ }
 }
 
+async function resetAccount(row: AccountView) {
+  try {
+    await ElMessageBox.confirm(
+      `确认把“${row.name}”重置为系统初始密码吗？该人员所有已登录设备会立即退出，下一次登录必须设置新密码。`,
+      '重置人员密码',
+      { type: 'warning', confirmButtonText: '确认重置', cancelButtonText: '取消' }
+    )
+  } catch (action) {
+    if (action === 'cancel' || action === 'close') return
+    throw action
+  }
+  busyAccountId.value = row.staff_id
+  try {
+    await api.adminResetPassword(row.staff_id)
+    accountRows.value = await api.adminAccounts()
+    await loadAuditOnly()
+    ElMessage.success(`${row.name} 已重置；请单独告知其使用初始密码登录并立即修改。`)
+  } catch (error: any) {
+    const detail = error?.response?.data?.detail
+    ElMessage.error(typeof detail === 'string' ? detail : detail?.message || '账号密码重置失败')
+  } finally {
+    busyAccountId.value = null
+  }
+}
+
+function accountState(row: AccountView): { label: string; type: 'success' | 'warning' | 'info' | 'danger' } {
+  if (!row.is_active) return { label: '已停用', type: 'info' }
+  if (!row.password_initialized) return { label: '未初始化', type: 'danger' }
+  if (row.must_change_password) return { label: '待首次改密', type: 'warning' }
+  return { label: '个人密码已设置', type: 'success' }
+}
+
 function formatBytes(size: number) {
   if (!Number.isFinite(size)) return '—'
   if (size < 1024) return `${size} B`
@@ -455,6 +530,8 @@ function auditAction(method: string, path: string) {
   const operation: Record<string, string> = { POST: '新增/执行', PATCH: '修改', DELETE: '删除', PUT: '更新' }
   const area = path.includes('/restore') ? '恢复任务'
     : path.includes('/backups') || path.includes('/backup') ? (isCloud.value ? '备份与 OSS' : '备份与共享盘')
+      : path.includes('/admin/accounts') ? '人员账号'
+        : path.includes('/session/change-password') ? '个人密码'
       : path.includes('/render') ? '生成 Word'
         : path.includes('/imports/') ? '导入数据'
           : path.includes('/handover-items') || path.includes('/items') ? '交接事项'
@@ -476,7 +553,7 @@ function auditAction(method: string, path: string) {
 .admin-alert { margin-bottom: 14px; }
 .restore-alert-copy { display: flex; align-items: center; justify-content: space-between; gap: 16px; width: 100%; }
 .admin-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
-.admin-card, .audit-card, .backup-card { padding: 18px; border: 1px solid #e2eaf3; border-radius: 14px; background: #fbfdff; }
+.admin-card, .account-card, .audit-card, .backup-card { padding: 18px; border: 1px solid #e2eaf3; border-radius: 14px; background: #fbfdff; }
 .card-heading { margin-bottom: 15px; display: flex; gap: 11px; }
 .card-heading h4 { margin: 1px 0 4px; color: #27415d; }
 .card-icon { width: 38px; height: 38px; display: grid; place-items: center; flex: 0 0 auto; border-radius: 11px; font-size: 12px; font-weight: 850; }
@@ -501,7 +578,7 @@ function auditAction(method: string, path: string) {
 .backup-result strong { color: #217052; font-size: 12px; }
 .backup-warning { color: #a8680b; }
 .button-row { display: flex; flex-wrap: wrap; gap: 8px; }
-.backup-card, .audit-card { margin-top: 14px; background: #fff; }
+.account-card, .backup-card, .audit-card { margin-top: 14px; background: #fff; }
 .audit-heading { margin-bottom: 12px; }
 @media (max-width: 760px) {
   .admin-grid { grid-template-columns: 1fr; }

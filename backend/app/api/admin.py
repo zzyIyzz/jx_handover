@@ -11,8 +11,8 @@ from sqlalchemy.orm import Session
 
 from app import config
 from app.db import get_db
-from app.models import AuditEvent
-from app.security import Identity, require_admin
+from app.models import AuditEvent, Staff
+from app.security import Identity, require_admin, reset_staff_password
 from app.services.ai.adapter import ai_configuration_status, test_qwen_connection
 from app.services.backup import (
     backup_status,
@@ -71,6 +71,46 @@ def recent_audit(
         "request_id": row.request_id,
         "created_at": row.created_at,
     } for row in rows]
+
+
+def _account_row(staff: Staff) -> dict:
+    return {
+        "staff_id": staff.id,
+        "name": staff.name,
+        "station_code": staff.station_code,
+        "staff_role": staff.role,
+        "account_role": "admin" if staff.name in config.ADMIN_NAMES else "operator",
+        "is_active": bool(staff.is_active),
+        "password_initialized": bool(staff.password_hash),
+        "must_change_password": bool(staff.must_change_password),
+        "password_updated_at": staff.password_updated_at,
+        "last_login_at": staff.last_login_at,
+    }
+
+
+@router.get("/accounts")
+def accounts(db: Session = Depends(get_db)):
+    return [
+        _account_row(staff)
+        for staff in db.query(Staff).order_by(Staff.name, Staff.id).all()
+    ]
+
+
+@router.post("/accounts/{staff_id}/reset-password")
+def reset_account_password(
+    staff_id: int,
+    db: Session = Depends(get_db),
+    identity: Identity = Depends(require_admin),
+):
+    if not config.ACCOUNT_LOGIN_ENABLED:
+        raise HTTPException(409, "当前运行模式未启用个人账号密码。")
+    staff = db.get(Staff, staff_id)
+    if staff is None:
+        raise HTTPException(404, "人员账号不存在。")
+    if identity.staff_id == staff.id:
+        raise HTTPException(422, "不能在管理页重置当前登录账号，请使用右上角“修改密码”。")
+    reset_staff_password(db, staff)
+    return _account_row(staff)
 
 
 def _raise_backup_error(exc: Exception) -> None:

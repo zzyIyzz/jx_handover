@@ -86,6 +86,7 @@ def health():
         "port": config.APP_PORT,
         "mode": config.APP_MODE,
         "auth_required": config.AUTH_REQUIRED,
+        "login_mode": "account" if config.ACCOUNT_LOGIN_ENABLED else "shared",
     }
     if config.APP_MODE == "cloud":
         public_payload["public_port"] = config.PUBLIC_PORT

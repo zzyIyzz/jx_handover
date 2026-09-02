@@ -26,7 +26,7 @@ esac
 if [[ ! -f "${env_file}" ]]; then
   cp -- "${env_template}" "${env_file}"
   chmod 0600 "${env_file}"
-  echo "已按 ${profile} 模板创建 ${env_file}，请先填写实际 HTTPS 地址、访问口令、会话密钥、管理员和 Qwen Key。"
+  echo "已按 ${profile} 模板创建 ${env_file}，请先填写实际 HTTPS 地址、会话密钥、管理员和 Qwen Key；人员首次密码为 aaaa0000*。"
 else
   chmod 0600 "${env_file}"
   echo "保留已有 ${env_file}，没有覆盖。"

@@ -25,7 +25,7 @@ from urllib.parse import urlsplit
 from dotenv import load_dotenv
 
 
-APP_VERSION = os.getenv("JX_APP_VERSION", "0.5.0").strip() or "0.5.0"
+APP_VERSION = os.getenv("JX_APP_VERSION", "0.5.1").strip() or "0.5.1"
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -155,12 +155,18 @@ QWEN_API_KEY = os.getenv("QWEN_API_KEY", "").strip()
 AI_STRUCTURED_MODE = os.getenv("AI_STRUCTURED_MODE", "json_schema").strip()
 AI_TIMEOUT_SECONDS = _env_float("AI_TIMEOUT_SECONDS", 60.0, minimum=5.0)
 
-# Lightweight shared identity.  Cloud mode is deliberately allowed only behind
-# a private reverse-proxy boundary (fixed office IPs or a VPN); it is not an
-# Internet identity provider and must never be opened to arbitrary source IPs.
+# Cloud mode uses one password per staff name and forces a password change on
+# first login.  It is still deployed behind HTTPS and a private reverse-proxy
+# boundary (fixed office IPs or VPN); application login does not replace either.
 AUTH_REQUIRED = os.getenv(
     "JX_AUTH_REQUIRED", "1" if APP_MODE in {"server", "cloud"} else "0"
 ).strip().lower() not in {"0", "false", "no", "off"}
+ACCOUNT_LOGIN_ENABLED = _env_bool(
+    "JX_ACCOUNT_LOGIN_ENABLED", APP_MODE == "cloud"
+)
+INITIAL_ACCOUNT_PASSWORD = os.getenv(
+    "JX_INITIAL_ACCOUNT_PASSWORD", "aaaa0000*"
+)
 ACCESS_CODE = os.getenv("JX_ACCESS_CODE", "").strip()
 SESSION_SECRET = os.getenv("JX_SESSION_SECRET", "").strip()
 SESSION_TTL_HOURS = _env_int(
@@ -214,10 +220,16 @@ def validate_runtime_configuration() -> None:
         )
     if not AUTH_REQUIRED:
         problems.append("JX_AUTH_REQUIRED 必须为 1。")
-    if len(ACCESS_CODE) < 12:
-        problems.append("JX_ACCESS_CODE 至少需要 12 个字符。")
-    elif any(marker in ACCESS_CODE for marker in ("请替换", "请填写")):
-        problems.append("JX_ACCESS_CODE 仍是示例占位文字，请生成真实随机口令。")
+    if not ACCOUNT_LOGIN_ENABLED:
+        problems.append("云端 JX_ACCOUNT_LOGIN_ENABLED 必须为 1，使用个人账号和密码登录。")
+    if ACCOUNT_LOGIN_ENABLED:
+        if len(INITIAL_ACCOUNT_PASSWORD) < 8:
+            problems.append("JX_INITIAL_ACCOUNT_PASSWORD 至少需要 8 个字符。")
+    else:
+        if len(ACCESS_CODE) < 12:
+            problems.append("JX_ACCESS_CODE 至少需要 12 个字符。")
+        elif any(marker in ACCESS_CODE for marker in ("请替换", "请填写")):
+            problems.append("JX_ACCESS_CODE 仍是示例占位文字，请生成真实随机口令。")
     if len(SESSION_SECRET) < 32:
         problems.append("JX_SESSION_SECRET 至少需要 32 个字符，并且只能保存在服务器配置文件中。")
     elif any(marker in SESSION_SECRET for marker in ("请替换", "请填写")):

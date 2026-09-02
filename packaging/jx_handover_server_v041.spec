@@ -15,6 +15,8 @@ if str(backend_root) not in sys.path:
 server_hidden_imports = (
     collect_submodules("app")
     + collect_submodules("uvicorn")
+    + collect_submodules("pwdlib")
+    + collect_submodules("argon2")
     + ["sqlalchemy.dialects.sqlite"]
 )
 shared_data_files = [
