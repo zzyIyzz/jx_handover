@@ -77,6 +77,11 @@ with TestClient(app, base_url="https://handover.example.test:1215") as client:
         headers={"Origin": "https://lookalike.example.test:1215"},
         json={"name": "测试管理员", "access_code": "cloud-test-code-2026"},
     )
+    missing_public_port = client.post(
+        "/api/session/login",
+        headers={"Origin": "https://handover.example.test"},
+        json={"name": "测试管理员", "access_code": "cloud-test-code-2026"},
+    )
     login = client.post(
         "/api/session/login",
         headers={"Origin": "https://handover.example.test:1215"},
@@ -95,6 +100,7 @@ with TestClient(app, base_url="https://handover.example.test:1215") as client:
         "hsts": health.headers.get("strict-transport-security", ""),
         "csp": health.headers.get("content-security-policy", ""),
         "foreign_status": foreign.status_code,
+        "missing_public_port_status": missing_public_port.status_code,
         "login_status": login.status_code,
         "set_cookie": login.headers.get("set-cookie", ""),
         "protected_status": protected.status_code,
@@ -120,6 +126,7 @@ with TestClient(app, base_url="https://handover.example.test:1215") as client:
         self.assertIn("max-age=31536000", result["hsts"])
         self.assertIn("frame-ancestors 'none'", result["csp"])
         self.assertEqual(result["foreign_status"], 403)
+        self.assertEqual(result["missing_public_port_status"], 403)
         self.assertEqual(result["login_status"], 200)
         self.assertIn("secure", result["set_cookie"].lower())
         self.assertIn("httponly", result["set_cookie"].lower())
@@ -335,6 +342,12 @@ class CloudSecurityUnitTest(unittest.TestCase):
         self.assertIn("acme.sh.*--cron", certificate_script)
         self.assertIn("before-jx-", nginx_configure_script)
         self.assertIn("已恢复原宝塔配置", nginx_configure_script)
+        self.assertIn("公网端口 1215 已被其他程序占用", nginx_configure_script)
+        self.assertIn("listener_has_non_nginx_process", nginx_configure_script)
+        self.assertIn("listener_is_public_nginx_only", nginx_configure_script)
+        self.assertIn("Nginx 重载失败", nginx_configure_script)
+        self.assertIn("原文件已恢复，但 Nginx 恢复重载失败", nginx_configure_script)
+        self.assertIn("没有成功监听公网端口 1215", nginx_configure_script)
         self.assertIn("公网 HTTPS 1215", nginx_configure_script)
         self.assertIn("内部 127.0.0.1:8765", nginx_configure_script)
         self.assertIn("listen 1215 ssl", ip_nginx)
@@ -355,9 +368,10 @@ class CloudSecurityUnitTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
         for nginx_text in (ip_nginx, domain_nginx, location_nginx):
             # 非标准 HTTPS 端口必须把 Host（含端口）与转发端口传给后端。
-            self.assertIn("proxy_set_header Host $http_host;", nginx_text)
-            self.assertIn("proxy_set_header X-Forwarded-Host $http_host;", nginx_text)
+            self.assertIn("proxy_set_header Host $host:1215;", nginx_text)
+            self.assertIn("proxy_set_header X-Forwarded-Host $host:1215;", nginx_text)
             self.assertIn("proxy_set_header X-Forwarded-Port 1215;", nginx_text)
+            self.assertNotIn("$http_host", nginx_text)
 
 
 if __name__ == "__main__":

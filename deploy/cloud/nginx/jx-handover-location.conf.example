@@ -13,12 +13,12 @@ location / {
     proxy_pass http://127.0.0.1:8765;
     proxy_http_version 1.1;
     # 非标准 HTTPS 端口必须把端口一并传给后端，否则重定向会跳到默认 443。
-    proxy_set_header Host $http_host;
+    proxy_set_header Host $host:1215;
     proxy_set_header X-Real-IP $remote_addr;
     # Nginx 是唯一可信边界，覆盖客户端自带 X-Forwarded-For，避免伪造审计 IP。
     proxy_set_header X-Forwarded-For $remote_addr;
     proxy_set_header X-Forwarded-Proto https;
-    proxy_set_header X-Forwarded-Host $http_host;
+    proxy_set_header X-Forwarded-Host $host:1215;
     proxy_set_header X-Forwarded-Port 1215;
 
     proxy_connect_timeout 10s;
