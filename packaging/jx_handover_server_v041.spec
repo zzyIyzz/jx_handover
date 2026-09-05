@@ -15,6 +15,8 @@ if str(backend_root) not in sys.path:
 server_hidden_imports = (
     collect_submodules("app")
     + collect_submodules("uvicorn")
+    + collect_submodules("pwdlib")
+    + collect_submodules("argon2")
     + ["sqlalchemy.dialects.sqlite"]
 )
 shared_data_files = [
@@ -60,7 +62,7 @@ server_exe = EXE(
     console=False,
     disable_windowed_traceback=False,
     icon=str(project_root / "packaging" / "handover.ico"),
-    version=str(project_root / "packaging" / "version_info_v040_server.txt"),
+    version=str(project_root / "packaging" / "version_info_v041_server.txt"),
     uac_admin=False,
 )
 
@@ -91,7 +93,7 @@ controller_exe = EXE(
     console=False,
     disable_windowed_traceback=False,
     icon=str(project_root / "packaging" / "handover.ico"),
-    version=str(project_root / "packaging" / "version_info_v040_server.txt"),
+    version=str(project_root / "packaging" / "version_info_v041_server.txt"),
     uac_admin=True,
 )
 
@@ -105,5 +107,5 @@ distribution = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="江西片区智能交接班_局域网服务器_V0.4.0_win-x64",
+    name="江西片区智能交接班_局域网服务器_V0.4.1_win-x64",
 )

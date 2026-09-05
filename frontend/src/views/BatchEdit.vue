@@ -4,7 +4,7 @@
       <header class="page-hero">
         <div>
           <el-button link class="back-button" @click="router.push('/')">← 返回工作台</el-button>
-          <span class="eyebrow">V0.4.0 · 局域网多人协作</span>
+          <span class="eyebrow">V0.5.1 · 多人集中协作</span>
           <h1>{{ currentStation.station_name }}交接班记录</h1>
           <p>{{ cnDate(batch.start_date) }} — {{ cnDate(batch.end_date) }} 班次 · 交接日 {{ cnDate(batch.handover_date) }}</p>
         </div>

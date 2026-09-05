@@ -1,20 +1,38 @@
-"""Global configuration shared by desktop and LAN-server packages.
+"""Global configuration shared by desktop, LAN-server and cloud packages.
 
-V0.4 keeps port 8765 fixed, but separates two explicit operating modes:
+The application keeps its existing port 8765.  In cloud mode that port is
+published only on ECS loopback, while BaoTa/Nginx owns the user-selected
+public HTTPS port 1215.  Bind address and security requirements depend on one
+of three explicit modes:
 
 ``desktop``
     Listen on loopback and keep data in the current user's LocalAppData.
 ``server``
     Listen on all interfaces and keep the only live database on the server's
     local disk.  A NAS path may receive completed backups, never the live DB.
+``cloud``
+    Listen inside one container and require HTTPS, strict host validation,
+    secure cookies and an outer private-access boundary at the reverse proxy.
 """
 from __future__ import annotations
 
 import os
 import sys
+from ipaddress import ip_address
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
+
+
+APP_VERSION = os.getenv("JX_APP_VERSION", "0.5.1").strip() or "0.5.1"
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw not in {"0", "false", "no", "off"}
 
 
 def _env_float(name: str, default: float, *, minimum: float) -> float:
@@ -46,25 +64,40 @@ configured_env_file = os.getenv("JX_HANDOVER_CONFIG_FILE", "").strip()
 if configured_env_file:
     load_dotenv(Path(configured_env_file).expanduser(), override=True)
 
-# Port 8765 is intentionally fixed in both modes.  Server mode changes only
-# the bind address; users visit the server IP or DNS name, not 0.0.0.0.
+# Preserve the application port 8765 in every mode.  Cloud Docker publishes it
+# only on ECS loopback; BaoTa/Nginx separately owns public HTTPS port 1215.
 APP_MODE = os.getenv("JX_HANDOVER_MODE", "desktop").strip().lower()
-if APP_MODE not in {"desktop", "server"}:
+if APP_MODE not in {"desktop", "server", "cloud"}:
     APP_MODE = "desktop"
-APP_HOST = "0.0.0.0" if APP_MODE == "server" else "127.0.0.1"
+APP_HOST = "0.0.0.0" if APP_MODE in {"server", "cloud"} else "127.0.0.1"
 APP_PORT = 8765
+PUBLIC_PORT = 1215 if APP_MODE == "cloud" else APP_PORT
 PUBLIC_HOST = os.getenv("JX_PUBLIC_HOST", "").strip()
-PUBLIC_URL = (
-    f"http://{PUBLIC_HOST}:{APP_PORT}"
-    if PUBLIC_HOST
+_explicit_public_url = os.getenv("JX_PUBLIC_URL", "").strip().rstrip("/")
+PUBLIC_URL = _explicit_public_url or (
+    f"http://{PUBLIC_HOST}:{APP_PORT}" if PUBLIC_HOST
     else (f"http://127.0.0.1:{APP_PORT}" if APP_MODE == "desktop" else "")
 )
+_public_url_parts = urlsplit(PUBLIC_URL)
+PUBLIC_HOSTNAME = (_public_url_parts.hostname or PUBLIC_HOST).strip().lower()
+
+_trusted_hosts_raw = os.getenv("JX_TRUSTED_HOSTS", "").strip()
+TRUSTED_HOSTS = [
+    value.strip().lower()
+    for value in _trusted_hosts_raw.split(",")
+    if value.strip()
+]
+if not TRUSTED_HOSTS and APP_MODE == "desktop":
+    TRUSTED_HOSTS = ["127.0.0.1", "localhost"]
+
+CLOUD_ACCESS_SCOPE = os.getenv("JX_CLOUD_ACCESS_SCOPE", "").strip().lower()
+COOKIE_SECURE = _env_bool("JX_COOKIE_SECURE", APP_MODE == "cloud")
 
 configured_data_root = os.getenv("JX_HANDOVER_DATA_DIR", "").strip()
 if configured_data_root:
     USER_DATA_ROOT = Path(configured_data_root).expanduser().resolve()
 elif RUNNING_FROZEN:
-    if APP_MODE == "server":
+    if APP_MODE in {"server", "cloud"}:
         program_data = os.getenv("PROGRAMDATA", "").strip()
         if not program_data:
             program_data = str(Path.home() / "AppData" / "Local")
@@ -76,7 +109,7 @@ elif RUNNING_FROZEN:
         USER_DATA_ROOT = Path(local_app_data) / "JXHandover"
 else:
     USER_DATA_ROOT = SOURCE_BASE / (
-        "runtime-server" if APP_MODE == "server" else "runtime"
+        "runtime-server" if APP_MODE in {"server", "cloud"} else "runtime"
     )
 
 DATA_DIR = USER_DATA_ROOT / "data"
@@ -122,16 +155,121 @@ QWEN_API_KEY = os.getenv("QWEN_API_KEY", "").strip()
 AI_STRUCTURED_MODE = os.getenv("AI_STRUCTURED_MODE", "json_schema").strip()
 AI_TIMEOUT_SECONDS = _env_float("AI_TIMEOUT_SECONDS", 60.0, minimum=5.0)
 
-# Lightweight LAN identity.  In server mode every browser selects a staff name
-# once.  A shared access code can be required without exposing the Qwen key.
+# Cloud mode uses one password per staff name and forces a password change on
+# first login.  It is still deployed behind HTTPS and a private reverse-proxy
+# boundary (fixed office IPs or VPN); application login does not replace either.
 AUTH_REQUIRED = os.getenv(
-    "JX_AUTH_REQUIRED", "1" if APP_MODE == "server" else "0"
+    "JX_AUTH_REQUIRED", "1" if APP_MODE in {"server", "cloud"} else "0"
 ).strip().lower() not in {"0", "false", "no", "off"}
+ACCOUNT_LOGIN_ENABLED = _env_bool(
+    "JX_ACCOUNT_LOGIN_ENABLED", APP_MODE == "cloud"
+)
+INITIAL_ACCOUNT_PASSWORD = os.getenv(
+    "JX_INITIAL_ACCOUNT_PASSWORD", "aaaa0000*"
+)
 ACCESS_CODE = os.getenv("JX_ACCESS_CODE", "").strip()
 SESSION_SECRET = os.getenv("JX_SESSION_SECRET", "").strip()
-SESSION_TTL_HOURS = _env_int("JX_SESSION_TTL_HOURS", 168, minimum=1)
+SESSION_TTL_HOURS = _env_int(
+    "JX_SESSION_TTL_HOURS", 12 if APP_MODE == "cloud" else 168, minimum=1
+)
+LOGIN_MAX_FAILURES = _env_int("JX_LOGIN_MAX_FAILURES", 5, minimum=1)
+LOGIN_NETWORK_MAX_FAILURES = _env_int(
+    "JX_LOGIN_NETWORK_MAX_FAILURES", 30, minimum=LOGIN_MAX_FAILURES
+)
+LOGIN_WINDOW_SECONDS = _env_int("JX_LOGIN_WINDOW_SECONDS", 600, minimum=30)
+LOGIN_BLOCK_SECONDS = _env_int("JX_LOGIN_BLOCK_SECONDS", 900, minimum=30)
 ADMIN_NAMES = {
     value.strip()
     for value in os.getenv("JX_ADMIN_NAMES", "").split(",")
     if value.strip()
 }
+
+
+def validate_runtime_configuration() -> None:
+    """Fail closed when a cloud deployment would expose an unsafe setup.
+
+    The Docker entrypoint and FastAPI startup both call this function.  Keeping
+    validation in the application prevents a later Compose or BaoTa edit from
+    silently disabling the controls described in the deployment guide.
+    """
+    if APP_MODE != "cloud":
+        return
+
+    problems: list[str] = []
+    parsed = urlsplit(PUBLIC_URL)
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in {"", "/"}
+    ):
+        problems.append(
+            "JX_PUBLIC_URL 必须是无路径且显式包含 :1215 的 HTTPS 地址，例如 "
+            "https://handover.example.com:1215 或 https://公网IPv4:1215。"
+        )
+    try:
+        configured_public_port = parsed.port
+    except ValueError:
+        configured_public_port = None
+    if configured_public_port != PUBLIC_PORT:
+        problems.append(
+            f"云端 JX_PUBLIC_URL 必须显式包含公网 HTTPS 端口 :{PUBLIC_PORT}。"
+        )
+    if not AUTH_REQUIRED:
+        problems.append("JX_AUTH_REQUIRED 必须为 1。")
+    if not ACCOUNT_LOGIN_ENABLED:
+        problems.append("云端 JX_ACCOUNT_LOGIN_ENABLED 必须为 1，使用个人账号和密码登录。")
+    if ACCOUNT_LOGIN_ENABLED:
+        if len(INITIAL_ACCOUNT_PASSWORD) < 8:
+            problems.append("JX_INITIAL_ACCOUNT_PASSWORD 至少需要 8 个字符。")
+    else:
+        if len(ACCESS_CODE) < 12:
+            problems.append("JX_ACCESS_CODE 至少需要 12 个字符。")
+        elif any(marker in ACCESS_CODE for marker in ("请替换", "请填写")):
+            problems.append("JX_ACCESS_CODE 仍是示例占位文字，请生成真实随机口令。")
+    if len(SESSION_SECRET) < 32:
+        problems.append("JX_SESSION_SECRET 至少需要 32 个字符，并且只能保存在服务器配置文件中。")
+    elif any(marker in SESSION_SECRET for marker in ("请替换", "请填写")):
+        problems.append("JX_SESSION_SECRET 仍是示例占位文字，请生成真实随机密钥。")
+    if not COOKIE_SECURE:
+        problems.append("JX_COOKIE_SECURE 必须为 1。")
+    if SESSION_TTL_HOURS > 24:
+        problems.append("云端 JX_SESSION_TTL_HOURS 不能超过 24 小时。")
+    if not ADMIN_NAMES:
+        problems.append("JX_ADMIN_NAMES 至少需要配置一名系统管理员。")
+    elif any(marker in name for name in ADMIN_NAMES for marker in ("请替换", "请填写")):
+        problems.append("JX_ADMIN_NAMES 仍是示例占位文字，请填写实际管理员姓名。")
+    if CLOUD_ACCESS_SCOPE != "private":
+        problems.append(
+            "JX_CLOUD_ACCESS_SCOPE 必须为 private，并在宝塔 Nginx 使用固定 IP 白名单或 VPN。"
+        )
+    if not TRUSTED_HOSTS:
+        problems.append("JX_TRUSTED_HOSTS 不能为空。")
+    elif "*" in TRUSTED_HOSTS:
+        problems.append("云端 JX_TRUSTED_HOSTS 不允许使用通配符 *。")
+    if parsed.hostname and parsed.hostname.lower() not in TRUSTED_HOSTS:
+        problems.append("JX_TRUSTED_HOSTS 必须包含 JX_PUBLIC_URL 的域名。")
+    if parsed.hostname and parsed.hostname.lower() == "handover.example.com":
+        problems.append("JX_PUBLIC_URL 仍是示例域名，请替换为实际 HTTPS 域名。")
+    if parsed.hostname:
+        try:
+            public_address = ip_address(parsed.hostname)
+        except ValueError:
+            public_address = None
+        if public_address is not None and (
+            public_address.version != 4 or not public_address.is_global
+        ):
+            problems.append(
+                "使用 IP 访问时，JX_PUBLIC_URL 必须填写 ECS 的真实公网 IPv4，不能使用示例、内网或保留地址。"
+            )
+    if Path(USER_DATA_ROOT).resolve() == Path(Path(USER_DATA_ROOT).anchor):
+        problems.append("JX_HANDOVER_DATA_DIR 不能使用文件系统根目录。")
+    if not DATABASE_URL.startswith("sqlite:///"):
+        problems.append("当前云端测试版只支持 ECS 本地磁盘上的单实例 SQLite 数据库。")
+
+    if problems:
+        formatted = "\n".join(f"- {problem}" for problem in problems)
+        raise RuntimeError(f"云端安全配置未通过：\n{formatted}")

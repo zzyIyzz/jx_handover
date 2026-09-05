@@ -201,7 +201,13 @@ class V040MigrationTest(unittest.TestCase):
                 source_sha256="abc",
                 normalized_json='[{"legacy":true}]',
             )
-            db.add(preview)
+            legacy_staff = Staff(
+                station_code="REGION",
+                name="迁移保留人员",
+                role="现场值守",
+                note="旧数据不得丢失",
+            )
+            db.add_all([preview, legacy_staff])
             db.commit()
             preview_id = preview.id
             db.close()
@@ -217,6 +223,14 @@ class V040MigrationTest(unittest.TestCase):
                 connection.execute(text(
                     "ALTER TABLE section_import_previews DROP COLUMN ai_usage_json"
                 ))
+                for column in (
+                    "password_hash",
+                    "must_change_password",
+                    "session_version",
+                    "password_updated_at",
+                    "last_login_at",
+                ):
+                    connection.execute(text(f"ALTER TABLE staff DROP COLUMN {column}"))
 
             backup_dir = root / "migration-backups"
             first = migrate_database(engine, backup_dir=backup_dir)
@@ -229,6 +243,16 @@ class V040MigrationTest(unittest.TestCase):
                 {"ai_status", "ai_model", "ai_usage_json"}.issubset(columns)
             )
             self.assertIn("audit_events", inspector.get_table_names())
+            staff_columns = {
+                column["name"] for column in inspector.get_columns("staff")
+            }
+            self.assertTrue({
+                "password_hash",
+                "must_change_password",
+                "session_version",
+                "password_updated_at",
+                "last_login_at",
+            }.issubset(staff_columns))
             self.assertIsNotNone(first["backup_path"])
             self.assertTrue(Path(first["backup_path"]).exists())
             with engine.connect() as connection:
@@ -242,6 +266,18 @@ class V040MigrationTest(unittest.TestCase):
             self.assertEqual(migrated.ai_status, "not_requested")
             self.assertEqual(migrated.ai_model, "")
             self.assertEqual(migrated.ai_usage_json, "{}")
+            with engine.connect() as connection:
+                migrated_staff = connection.execute(text(
+                    "SELECT name, role, note, password_hash, "
+                    "must_change_password, session_version FROM staff "
+                    "WHERE name='迁移保留人员'"
+                )).one()
+            self.assertEqual(migrated_staff.name, "迁移保留人员")
+            self.assertEqual(migrated_staff.role, "现场值守")
+            self.assertEqual(migrated_staff.note, "旧数据不得丢失")
+            self.assertEqual(migrated_staff.password_hash, "")
+            self.assertEqual(migrated_staff.must_change_password, 1)
+            self.assertEqual(migrated_staff.session_version, 1)
 
             backup_count = len(list(backup_dir.glob("*.db")))
             second = migrate_database(engine, backup_dir=backup_dir)
@@ -297,6 +333,7 @@ class V040SessionTest(unittest.TestCase):
     def test_login_options_show_names_only_and_protected_routes_require_cookie(self):
         settings = {
             "AUTH_REQUIRED": True,
+            "ACCOUNT_LOGIN_ENABLED": False,
             "ACCESS_CODE": "lan-only-code",
             "SESSION_SECRET": "fixed-test-secret-that-never-leaves-this-test",
             "SESSION_TTL_HOURS": 1,
@@ -310,6 +347,7 @@ class V040SessionTest(unittest.TestCase):
 
                 options = anonymous.get("/api/session/options")
                 self.assertEqual(options.status_code, 200)
+                self.assertEqual(options.json()["login_mode"], "shared")
                 self.assertEqual(options.json()["staff_names"], ["熊思奇", "钟宇"])
                 serialized = json.dumps(options.json(), ensure_ascii=False)
                 self.assertNotIn("科技专责", serialized)

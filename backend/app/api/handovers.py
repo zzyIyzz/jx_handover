@@ -1,13 +1,14 @@
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from app import config
 from app.db import get_db
 from app.models import DocumentSnapshot, Staff, Station
-from app.security import require_identity
+from app.security import initialize_staff_password, require_identity
 from app.services import handover_service as hs, periodic
 from app.services.document import publish
 
@@ -317,8 +318,24 @@ def list_staff(station_code: Optional[str] = None,
 
 @router.post("/staff")
 def add_staff(req: StaffReq, db: Session = Depends(get_db)):
-    s = Staff(station_code=req.station_code, name=req.name, role=req.role,
+    clean_name = req.name.strip()
+    if not clean_name:
+        raise HTTPException(422, "人员姓名不能为空。")
+    if config.ACCOUNT_LOGIN_ENABLED:
+        duplicate = (
+            db.query(Staff)
+            .filter(Staff.is_active == 1, Staff.name == clean_name)
+            .first()
+        )
+        if duplicate is not None:
+            raise HTTPException(
+                409,
+                "个人账号使用姓名登录；已有同名人员，请先调整姓名或停用原账号。",
+            )
+    s = Staff(station_code=req.station_code, name=clean_name, role=req.role,
               note=req.note or "", is_active=1)
+    if config.ACCOUNT_LOGIN_ENABLED:
+        initialize_staff_password(s)
     db.add(s)
     db.commit()
     return _staff_row(s)

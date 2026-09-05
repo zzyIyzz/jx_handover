@@ -1,4 +1,4 @@
-"""Machine-local settings for the V0.4 Windows LAN server package."""
+"""Machine-local settings for the V0.4.1 Windows LAN server package."""
 from __future__ import annotations
 
 import base64
@@ -14,7 +14,7 @@ from typing import Any
 import uuid
 
 
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.4.1"
 DEFAULT_QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DEFAULT_MODEL = "qwen3.8-flash"
 
@@ -111,7 +111,7 @@ def validate_local_data_root(value: str | Path, *, create: bool = True) -> Path:
         )
     if create:
         path.mkdir(parents=True, exist_ok=True)
-        probe = path / f".jxhandover-write-test-{uuid.uuid4().hex}.tmp"
+        probe = path / f".jx-{uuid.uuid4().hex[:8]}.tmp"
         try:
             with probe.open("xb") as stream:
                 stream.write(b"JXHandover local data directory probe\n")
@@ -338,6 +338,9 @@ def apply_server_environment(
     if settings is None or secrets_value is None:
         settings, secrets_value = load_server_settings()
     data_root = validate_local_data_root(configured_data_root(settings), create=True)
+    # Keep the historical V0.4.1 Windows package self-consistent when this
+    # branch also contains the separate V0.5.x cloud deployment profile.
+    os.environ["JX_APP_VERSION"] = APP_VERSION
     os.environ["JX_HANDOVER_MODE"] = "server"
     os.environ["JX_HANDOVER_DATA_DIR"] = str(data_root)
     os.environ["JX_PUBLIC_HOST"] = str(settings.get("public_host") or "").strip()

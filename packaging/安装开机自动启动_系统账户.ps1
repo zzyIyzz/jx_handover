@@ -43,7 +43,7 @@ Register-ScheduledTask `
     -Trigger $trigger `
     -Principal $systemPrincipal `
     -Settings $settings `
-    -Description "开机自动运行江西片区智能交接班 V0.4.0 局域网服务器" `
+    -Description "开机自动运行江西片区智能交接班 V0.4.1 局域网服务器" `
     -Force | Out-Null
 
 if (-not $SkipFirewall) {

@@ -334,7 +334,10 @@ class Staff(Base):
     station_code="REGION" 表示片区通用人员（所有场站可选）。"""
 
     __tablename__ = "staff"
-    __table_args__ = (Index("idx_staff_station", "station_code"),)
+    __table_args__ = (
+        Index("idx_staff_station", "station_code"),
+        Index("idx_staff_name", "name"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     station_code = Column(Text, nullable=False, default="REGION")
@@ -342,6 +345,13 @@ class Staff(Base):
     role = Column(Text, nullable=False, default="现场值守")
     note = Column(Text, nullable=False, default="")
     is_active = Column(Integer, nullable=False, default=1)
+    # Cloud accounts use the staff name as the login name.  Only an Argon2id
+    # hash is persisted; the bootstrap password is never stored in plaintext.
+    password_hash = Column(Text, nullable=False, default="")
+    must_change_password = Column(Integer, nullable=False, default=1)
+    session_version = Column(Integer, nullable=False, default=1)
+    password_updated_at = Column(Text)
+    last_login_at = Column(Text)
     created_at = Column(Text, nullable=False, default=now_iso)
 
 
@@ -350,7 +360,7 @@ class AuditEvent(Base):
 
     Request bodies and secrets are deliberately excluded. The trail answers
     who changed which API resource and when without duplicating operational
-    content or ever recording the Qwen key/access code.
+    content or ever recording the Qwen key, access code or personal password.
     """
 
     __tablename__ = "audit_events"

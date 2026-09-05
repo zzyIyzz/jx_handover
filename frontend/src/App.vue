@@ -8,7 +8,7 @@
       <div class="login-mark connection-mark">!</div>
       <span class="login-eyebrow">暂时无法连接</span>
       <h1>{{ networkOnline ? '系统初始化失败' : '交接班服务器未响应' }}</h1>
-      <p>{{ connectionError || '请确认这台电脑已连接检修中心局域网，并联系管理员检查服务器是否正在运行。恢复连接后可直接重试，不需要关闭浏览器。' }}</p>
+      <p>{{ connectionError || '请确认当前网络正常，并联系管理员检查交接班服务器是否正在运行。恢复连接后可直接重试，不需要关闭浏览器。' }}</p>
       <el-button type="primary" size="large" class="login-button" :loading="retrying" @click="retryConnection">
         重新连接
       </el-button>
@@ -21,22 +21,65 @@
       <div class="login-mark">交</div>
       <span class="login-eyebrow">江西片区检修中心</span>
       <h1>进入智能交接班系统</h1>
-      <p>选择自己的姓名即可进入；系统会记录操作人，人员列表中只显示姓名。</p>
+      <p>{{ sessionOptions?.login_mode === 'account'
+        ? '账号就是本人姓名。请使用自己的个人密码登录，系统会记录每次业务操作人。'
+        : '选择自己的姓名即可进入；系统会记录操作人，人员列表中只显示姓名。' }}</p>
       <el-form label-position="top" @submit.prevent="login">
-        <el-form-item label="我的姓名" required>
-          <el-select v-model="loginForm.name" filterable placeholder="请选择或搜索姓名" class="login-control">
+        <el-form-item :label="sessionOptions?.login_mode === 'account' ? '账号（本人姓名）' : '我的姓名'" required>
+          <el-input v-if="sessionOptions?.login_mode === 'account'" v-model="loginForm.name"
+                    autocomplete="username" placeholder="请输入本人姓名" class="login-control" />
+          <el-select v-else v-model="loginForm.name" filterable placeholder="请选择或搜索姓名" class="login-control">
             <el-option v-for="name in sessionOptions?.staff_names || []" :key="name" :label="name" :value="name" />
           </el-select>
         </el-form-item>
-        <el-form-item v-if="sessionOptions?.access_code_required" label="系统访问口令" required>
+        <el-form-item v-if="sessionOptions?.login_mode === 'account'" label="个人密码" required>
+          <el-input v-model="loginForm.password" type="password" show-password autocomplete="current-password"
+                    placeholder="请输入个人密码" class="login-control" />
+        </el-form-item>
+        <el-form-item v-else-if="sessionOptions?.access_code_required" label="系统访问口令" required>
           <el-input v-model="loginForm.accessCode" type="password" show-password autocomplete="current-password"
                     placeholder="请输入管理员提供的访问口令" class="login-control" />
         </el-form-item>
         <el-button type="primary" size="large" class="login-button" :loading="loginLoading" @click="login">
-          进入系统
+          {{ sessionOptions?.login_mode === 'account' ? '登录系统' : '进入系统' }}
         </el-button>
       </el-form>
       <div class="login-note">Qwen API Key 只保存在服务器端，使用人员无需填写。</div>
+    </section>
+  </main>
+
+  <main v-else-if="needsPasswordChange" class="login-page">
+    <section class="login-card">
+      <div class="login-mark">密</div>
+      <span class="login-eyebrow">账号安全</span>
+      <h1>{{ forcedPasswordChange ? '首次登录，请设置个人密码' : '修改个人密码' }}</h1>
+      <p>{{ forcedPasswordChange
+        ? `你好，${session?.name}。初始密码只能用于首次登录，修改完成后才能进入交接班页面。`
+        : `当前账号：${session?.name}。修改成功后，其他设备上的旧登录会立即失效。` }}</p>
+      <el-form label-position="top" @submit.prevent="changePassword">
+        <el-form-item label="当前密码" required>
+          <el-input v-model="passwordForm.currentPassword" type="password" show-password
+                    autocomplete="current-password" placeholder="请再次输入当前密码" class="login-control" />
+        </el-form-item>
+        <el-form-item label="新密码" required>
+          <el-input v-model="passwordForm.newPassword" type="password" show-password
+                    autocomplete="new-password" placeholder="至少 12 个字符，不能继续使用初始密码" class="login-control" />
+        </el-form-item>
+        <el-form-item label="确认新密码" required>
+          <el-input v-model="passwordForm.confirmPassword" type="password" show-password
+                    autocomplete="new-password" placeholder="请再输入一次新密码" class="login-control" />
+        </el-form-item>
+        <el-button type="primary" size="large" class="login-button" :loading="passwordChanging" @click="changePassword">
+          保存新密码并继续
+        </el-button>
+        <el-button v-if="forcedPasswordChange" class="login-button secondary-login-button" @click="logoutCurrentIdentity">
+          退出并更换账号
+        </el-button>
+        <el-button v-else class="login-button secondary-login-button" @click="cancelPasswordChange">
+          取消
+        </el-button>
+      </el-form>
+      <div class="login-note">密码只以不可逆哈希保存在正式数据库中，管理员无法查看你的密码。</div>
     </section>
   </main>
 
@@ -59,24 +102,29 @@
         </router-link>
         <div class="header-meta">
           <span class="safe-dot" :class="{ offline: !networkOnline }"></span>
-          <span class="safe-text">{{ !networkOnline ? '服务器连接中断' : sessionOptions?.mode === 'server' ? '数据统一保存在服务器' : '数据本地保存' }}</span>
+          <span class="safe-text">{{ !networkOnline ? '服务器连接中断' : sessionOptions?.mode === 'cloud' ? '数据统一保存在云服务器' : sessionOptions?.mode === 'server' ? '数据统一保存在服务器' : '数据本地保存' }}</span>
           <el-dropdown v-if="session?.name" trigger="click" @command="handleUserCommand">
             <button class="user-chip" type="button">{{ session.name }}⌄</button>
             <template #dropdown>
               <el-dropdown-menu>
                 <el-dropdown-item v-if="session.role === 'admin'" command="admin">系统管理</el-dropdown-item>
-                <el-dropdown-item command="logout" :divided="session.role === 'admin'">退出当前身份</el-dropdown-item>
+                <el-dropdown-item v-if="sessionOptions?.login_mode === 'account'" command="password" :divided="session.role === 'admin'">修改密码</el-dropdown-item>
+                <el-dropdown-item command="logout" :divided="sessionOptions?.login_mode !== 'account' && session.role === 'admin'">退出当前身份</el-dropdown-item>
               </el-dropdown-menu>
             </template>
           </el-dropdown>
-          <span class="version">V0.4.0 局域网多人 AI 版</span>
+          <span class="version">V0.5.1 个人账号部署测试版</span>
         </div>
       </div>
     </el-header>
     <el-main class="app-main">
       <router-view />
     </el-main>
-    <admin-panel v-if="session?.role === 'admin'" v-model="adminPanel" />
+    <admin-panel
+      v-if="session?.role === 'admin'"
+      v-model="adminPanel"
+      :current-staff-id="session.staff_id"
+    />
   </el-container>
 </template>
 
@@ -88,14 +136,19 @@ import AdminPanel from '@/components/AdminPanel.vue'
 
 const sessionLoading = ref(true)
 const loginLoading = ref(false)
+const passwordChanging = ref(false)
 const retrying = ref(false)
 const networkOnline = ref(navigator.onLine)
 const adminPanel = ref(false)
 const connectionError = ref('')
 const sessionOptions = ref<SessionOptions | null>(null)
 const session = ref<SessionState | null>(null)
-const loginForm = reactive({ name: '', accessCode: '' })
+const loginForm = reactive({ name: '', password: '', accessCode: '' })
+const passwordForm = reactive({ currentPassword: '', newPassword: '', confirmPassword: '' })
+const voluntaryPasswordChange = ref(false)
 const needsLogin = computed(() => Boolean(sessionOptions.value?.auth_required && !session.value?.authenticated))
+const forcedPasswordChange = computed(() => Boolean(session.value?.authenticated && session.value?.password_change_required))
+const needsPasswordChange = computed(() => Boolean(forcedPasswordChange.value || voluntaryPasswordChange.value))
 const serverUnavailable = computed(() => !sessionOptions.value && (!networkOnline.value || Boolean(connectionError.value)))
 
 async function loadSession() {
@@ -114,16 +167,39 @@ async function loadSession() {
 }
 
 async function login() {
-  if (!loginForm.name) return ElMessage.warning('请选择自己的姓名')
+  const loginName = loginForm.name.trim()
+  if (!loginName) return ElMessage.warning('请输入或选择自己的姓名')
+  if (sessionOptions.value?.login_mode === 'account' && !loginForm.password) return ElMessage.warning('请输入个人密码')
   if (sessionOptions.value?.access_code_required && !loginForm.accessCode) return ElMessage.warning('请输入系统访问口令')
   loginLoading.value = true
   try {
-    session.value = await api.sessionLogin(loginForm.name, loginForm.accessCode)
+    session.value = await api.sessionLogin(
+      loginName,
+      sessionOptions.value?.login_mode === 'account' ? loginForm.password : '',
+      sessionOptions.value?.login_mode === 'shared' ? loginForm.accessCode : ''
+    )
+    loginForm.password = ''
     loginForm.accessCode = ''
-    ElMessage.success(`欢迎，${session.value.name}`)
+    if (session.value.password_change_required) ElMessage.warning('这是初始密码，请先设置你自己的新密码。')
+    else ElMessage.success(`欢迎，${session.value.name}`)
   } catch (error: any) {
-    ElMessage.error(error?.response?.data?.detail || '无法进入系统，请检查姓名和访问口令。')
+    ElMessage.error(apiErrorMessage(error, '无法登录，请检查姓名和密码。'))
   } finally { loginLoading.value = false }
+}
+
+async function changePassword() {
+  if (!passwordForm.currentPassword) return ElMessage.warning('请输入当前密码')
+  if (passwordForm.newPassword.length < 12) return ElMessage.warning('新密码至少需要 12 个字符')
+  if (passwordForm.newPassword !== passwordForm.confirmPassword) return ElMessage.warning('两次输入的新密码不一致')
+  passwordChanging.value = true
+  try {
+    session.value = await api.sessionChangePassword(passwordForm.currentPassword, passwordForm.newPassword)
+    Object.assign(passwordForm, { currentPassword: '', newPassword: '', confirmPassword: '' })
+    voluntaryPasswordChange.value = false
+    ElMessage.success('个人密码已更新，其他旧登录已失效')
+  } catch (error: any) {
+    ElMessage.error(apiErrorMessage(error, '密码修改失败，请检查当前密码后重试。'))
+  } finally { passwordChanging.value = false }
 }
 
 async function handleUserCommand(command: string) {
@@ -131,22 +207,43 @@ async function handleUserCommand(command: string) {
     adminPanel.value = true
     return
   }
+  if (command === 'password') {
+    voluntaryPasswordChange.value = true
+    return
+  }
   if (command !== 'logout') return
+  await logoutCurrentIdentity()
+}
+
+async function logoutCurrentIdentity() {
   try {
     await api.sessionLogout()
     session.value = { authenticated: false }
     adminPanel.value = false
+    voluntaryPasswordChange.value = false
+    Object.assign(passwordForm, { currentPassword: '', newPassword: '', confirmPassword: '' })
     ElMessage.success('已退出当前身份')
   } catch {
     ElMessage.error('退出失败，请检查服务器连接后重试。')
   }
 }
 
+function cancelPasswordChange() {
+  voluntaryPasswordChange.value = false
+  Object.assign(passwordForm, { currentPassword: '', newPassword: '', confirmPassword: '' })
+}
+
+function apiErrorMessage(error: any, fallback: string) {
+  const detail = error?.response?.data?.detail
+  return typeof detail === 'string' ? detail : detail?.message || fallback
+}
+
 function sessionExpired() {
   if (sessionOptions.value?.auth_required && session.value?.authenticated) {
     session.value = { authenticated: false }
     adminPanel.value = false
-    ElMessage.warning('登录已过期，请重新选择自己的姓名进入。')
+    voluntaryPasswordChange.value = false
+    ElMessage.warning('登录已过期，请重新输入姓名和个人密码。')
   }
 }
 
@@ -283,6 +380,10 @@ select {
 .login-control,
 .login-button {
   width: 100%;
+}
+
+.secondary-login-button {
+  margin: 10px 0 0 !important;
 }
 
 .login-note {
