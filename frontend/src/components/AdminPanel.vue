@@ -162,7 +162,6 @@
       </div>
       <el-table v-if="accountRows.length" :data="accountRows" max-height="360" size="small" row-key="staff_id">
         <el-table-column prop="name" label="姓名/账号" min-width="120" />
-        <el-table-column prop="staff_role" label="岗位" min-width="145" />
         <el-table-column label="权限" width="92" align="center">
           <template #default="{ row }">
             <el-tag :type="row.account_role === 'admin' ? 'warning' : 'info'" size="small">

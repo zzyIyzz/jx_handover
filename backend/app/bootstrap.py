@@ -15,21 +15,25 @@ SEED_STATIONS = [
     ("ND_ZJT", "宁都真君堂光储电站", ["宁都", "真君堂", "宁都真君堂"]),
 ]
 
+# 人员名单以工作群成员为准（不含两个电站账号）；不再维护岗位角色。
 SEED_STAFF = [
-    ("REGION", "钟宇", "科技专责", "备件/台账记录"),
-    ("REGION", "连喆", "综合管理人员", "综合专责"),
-    ("REGION", "刘学森", "一次/营销专责", ""),
-    ("REGION", "张日君", "二次专责", ""),
-    ("REGION", "盛林", "风机光伏专责", "现场值守"),
-    ("REGION", "敖资溪", "通讯专责", ""),
-    ("REGION", "熊思奇", "带班负责人", "值班负责人"),
-    ("REGION", "郭桓君", "现场值守", ""),
-    ("REGION", "金宇鑫", "现场值守", ""),
-    ("REGION", "刘嘉华", "现场值守", ""),
-    ("REGION", "倪阳峰", "现场值守", ""),
-    ("REGION", "徐诚浩", "现场值守", ""),
-    ("REGION", "朱正昊炎", "现场值守", ""),
-    ("REGION", "周智源", "现场值守", ""),
+    ("REGION", "刘学森", "", ""),
+    ("REGION", "敖资溪", "", ""),
+    ("REGION", "曹浩", "", ""),
+    ("REGION", "郭桓君", "", ""),
+    ("REGION", "金宇鑫", "", ""),
+    ("REGION", "连喆", "", ""),
+    ("REGION", "刘嘉华", "", ""),
+    ("REGION", "倪阳峰", "", ""),
+    ("REGION", "潘和雨", "", ""),
+    ("REGION", "盛林", "", ""),
+    ("REGION", "熊思奇", "", ""),
+    ("REGION", "徐诚浩", "", ""),
+    ("REGION", "易子安", "", ""),
+    ("REGION", "张日君", "", ""),
+    ("REGION", "钟宇", "", ""),
+    ("REGION", "周智源", "", ""),
+    ("REGION", "朱正昊炎", "", ""),
 ]
 
 
@@ -37,6 +41,7 @@ def initialize_application_data() -> dict:
     migration = initialize_database()
     created_stations = 0
     created_staff = 0
+    updated_staff = 0
     db = SessionLocal()
     try:
         for code, name, aliases in SEED_STATIONS:
@@ -63,6 +68,10 @@ def initialize_application_data() -> dict:
                     created_at=now_iso(),
                 ))
                 created_staff += 1
+            elif exists.role != role or exists.note != note:
+                exists.role = role
+                exists.note = note
+                updated_staff += 1
         db.commit()
         validate_account_directory(db)
         initialized_accounts = initialize_missing_staff_passwords(db)
@@ -72,6 +81,7 @@ def initialize_application_data() -> dict:
         "migration": migration,
         "created_stations": created_stations,
         "created_staff": created_staff,
+        "updated_staff": updated_staff,
         "initialized_accounts": initialized_accounts,
     }
 

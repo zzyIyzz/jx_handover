@@ -39,7 +39,7 @@ export interface SessionState {
   password_change_required?: boolean
 }
 export interface AccountView {
-  staff_id: number; name: string; station_code: string; staff_role: string
+  staff_id: number; name: string; station_code: string
   account_role: 'admin' | 'operator'; is_active: boolean; password_initialized: boolean
   must_change_password: boolean; password_updated_at: string | null; last_login_at: string | null
 }
