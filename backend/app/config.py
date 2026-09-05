@@ -143,6 +143,16 @@ FRONTEND_DIST = RESOURCE_BASE / "frontend" / "dist"
 CLOUD_PUBLISH_DIR = os.getenv("CLOUD_PUBLISH_DIR", "").strip()
 NAS_BACKUP_DIR = os.getenv("JX_NAS_BACKUP_DIR", "").strip()
 
+# In-process verified full backups: scheduler cadence and local retention.
+# Daily backups are created at most once per calendar day; the scheduler keeps
+# checking long-running processes so restarts are never required.  NAS/off-site
+# copies are never pruned automatically, keeping off-site retention longer.
+AUTO_BACKUP_CHECK_SECONDS = _env_int(
+    "JX_AUTO_BACKUP_CHECK_SECONDS", 30 * 60, minimum=60
+)
+BACKUP_KEEP_DAILY = _env_int("JX_BACKUP_KEEP_DAILY", 30, minimum=1)
+BACKUP_KEEP_MANUAL = _env_int("JX_BACKUP_KEEP_MANUAL", 30, minimum=1)
+
 # AI
 AI_MODE = os.getenv("AI_MODE", "mock").strip().lower()
 if AI_MODE not in {"mock", "qwen"}:
@@ -155,14 +165,14 @@ QWEN_API_KEY = os.getenv("QWEN_API_KEY", "").strip()
 AI_STRUCTURED_MODE = os.getenv("AI_STRUCTURED_MODE", "json_schema").strip()
 AI_TIMEOUT_SECONDS = _env_float("AI_TIMEOUT_SECONDS", 60.0, minimum=5.0)
 
-# Cloud mode uses one password per staff name and forces a password change on
-# first login.  It is still deployed behind HTTPS and a private reverse-proxy
-# boundary (fixed office IPs or VPN); application login does not replace either.
+# Server and cloud modes use one password per staff name and force a password
+# change on first login.  Both are still deployed behind a private boundary
+# (fixed office IPs, VPN or HTTPS reverse proxy); login replaces neither.
 AUTH_REQUIRED = os.getenv(
     "JX_AUTH_REQUIRED", "1" if APP_MODE in {"server", "cloud"} else "0"
 ).strip().lower() not in {"0", "false", "no", "off"}
 ACCOUNT_LOGIN_ENABLED = _env_bool(
-    "JX_ACCOUNT_LOGIN_ENABLED", APP_MODE == "cloud"
+    "JX_ACCOUNT_LOGIN_ENABLED", APP_MODE in {"server", "cloud"}
 )
 INITIAL_ACCOUNT_PASSWORD = os.getenv(
     "JX_INITIAL_ACCOUNT_PASSWORD", "aaaa0000*"

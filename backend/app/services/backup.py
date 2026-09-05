@@ -19,6 +19,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 import zipfile
@@ -554,6 +555,7 @@ def backup_status() -> dict:
         "latest_nas_at": latest_synced.get("nas_synced_at") if latest_synced else None,
         "latest_nas_id": latest_synced.get("backup_id") if latest_synced else None,
         "nas_configured": bool(config.NAS_BACKUP_DIR),
+        "auto_backup": auto_backup_status(),
     }
 
 
@@ -911,3 +913,104 @@ def maybe_daily_backup() -> dict | None:
                 replicate_pending_backups(limit=10)
             return None
     return create_full_backup(reason="daily")
+
+
+def prune_full_backups() -> dict:
+    """Trim local bundles beyond retention, newest first.
+
+    Only backups with a readable manifest and creation time are eligible, so
+    anything suspicious stays on disk for human review.  Off-site NAS copies
+    are never deleted automatically.
+    """
+    limits = {
+        "daily": config.BACKUP_KEEP_DAILY,
+        "manual": config.BACKUP_KEEP_MANUAL,
+    }
+    buckets: dict[str, list[dict]] = {"daily": [], "manual": []}
+    skipped: list[str] = []
+    for item in list_full_backups():
+        backup_id = str(item.get("backup_id") or "")
+        if not str(item.get("created_at") or "") or not item.get("local_path"):
+            skipped.append(backup_id)
+            continue
+        bucket = "daily" if item.get("reason") == "daily" else "manual"
+        buckets[bucket].append(item)
+    removed: list[str] = []
+    for bucket, items in buckets.items():
+        items.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+        for item in items[limits[bucket]:]:
+            bundle = Path(str(item.get("local_path") or ""))
+            manifest = Path(str(item.get("manifest_path") or ""))
+            bundle.unlink(missing_ok=True)
+            manifest.unlink(missing_ok=True)
+            removed.append(str(item.get("backup_id") or ""))
+    return {
+        "removed": removed,
+        "skipped": skipped,
+        "keep_daily": limits["daily"],
+        "keep_manual": limits["manual"],
+    }
+
+
+_auto_backup_state: dict = {
+    "last_run_at": "",
+    "last_error": "",
+    "daily_created": False,
+    "removed": [],
+}
+_scheduler_started = False
+_scheduler_lock = threading.Lock()
+
+
+def run_auto_backup_cycle() -> dict:
+    """Ensure the daily backup exists, sync off-site copies and prune locally."""
+    try:
+        created = maybe_daily_backup()
+        pruned = prune_full_backups()
+    except Exception as exc:  # noqa: BLE001 - the scheduler must keep running
+        _auto_backup_state.update(
+            {"last_run_at": now_iso(), "last_error": str(exc)}
+        )
+        raise
+    state = {
+        "last_run_at": now_iso(),
+        "last_error": "",
+        "daily_created": bool(created),
+        "removed": pruned.get("removed", []),
+    }
+    _auto_backup_state.update(state)
+    return state
+
+
+def _auto_backup_loop() -> None:
+    while True:
+        time.sleep(config.AUTO_BACKUP_CHECK_SECONDS)
+        try:
+            run_auto_backup_cycle()
+        except Exception:  # noqa: BLE001
+            logging.getLogger(__name__).exception(
+                "Automatic backup cycle failed"
+            )
+
+
+def start_auto_backup_scheduler() -> bool:
+    """Start the daemon backup scheduler at most once per process."""
+    global _scheduler_started
+    with _scheduler_lock:
+        if _scheduler_started:
+            return False
+        _scheduler_started = True
+    threading.Thread(
+        target=_auto_backup_loop, name="jx-auto-backup", daemon=True
+    ).start()
+    return True
+
+
+def auto_backup_status() -> dict:
+    return {
+        "scheduler_started": _scheduler_started,
+        "check_interval_seconds": config.AUTO_BACKUP_CHECK_SECONDS,
+        "keep_daily": config.BACKUP_KEEP_DAILY,
+        "keep_manual": config.BACKUP_KEEP_MANUAL,
+        **_auto_backup_state,
+    }

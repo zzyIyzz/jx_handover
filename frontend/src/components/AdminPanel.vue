@@ -133,6 +133,7 @@
             <div><dt>配置状态</dt><dd>{{ isCloud ? '宿主机脚本管理' : diagnostics.nas.configured ? '已配置' : '未配置' }}</dd></div>
             <div><dt>待同步备份</dt><dd :class="diagnostics.backup.pending_nas ? 'bad' : 'good'">{{ diagnostics.backup.pending_nas }} 个</dd></div>
             <div><dt>最近本地备份</dt><dd>{{ diagnostics.backup.latest_local_at ? cnDateTime(diagnostics.backup.latest_local_at) : '尚无' }}</dd></div>
+            <div><dt>自动备份</dt><dd :class="diagnostics.backup.auto_backup?.last_error ? 'bad' : 'good'">{{ autoBackupLabel }}</dd></div>
             <div><dt>{{ isCloud ? 'OSS 状态' : '最近 NAS 同步' }}</dt><dd>{{ isCloud ? '请查看宝塔计划任务日志' : diagnostics.backup.latest_nas_at ? cnDateTime(diagnostics.backup.latest_nas_at) : '尚无' }}</dd></div>
           </dl>
         </template>
@@ -604,6 +605,14 @@ function reasonLabel(reason: string) {
   }
   return labels[reason] || reason || '其他'
 }
+
+const autoBackupLabel = computed(() => {
+  const auto = diagnostics.value?.backup?.auto_backup
+  if (!auto) return '——'
+  if (auto.last_error) return `上次自动备份异常：${auto.last_error}`
+  const intervalMin = Math.max(1, Math.round(auto.check_interval_seconds / 60))
+  return `常驻调度（每 ${intervalMin} 分钟检查），每日一份；本地保留 daily ${auto.keep_daily} 份 / manual ${auto.keep_manual} 份`
+})
 
 function nasStateLabel(state: string) {
   if (isCloud.value && state === 'not_configured') return '宿主机管理'

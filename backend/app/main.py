@@ -17,7 +17,13 @@ from app.bootstrap import initialize_application_data
 from app.cloud_security import protect_cloud_requests
 from app.db import engine
 from app.security import initialize_session_secret
-from app.services.backup import backup_status, maybe_daily_backup, pending_restore_status
+from app.services.backup import (
+    backup_status,
+    maybe_daily_backup,
+    pending_restore_status,
+    prune_full_backups,
+    start_auto_backup_scheduler,
+)
 
 APP_VERSION = config.APP_VERSION
 
@@ -63,9 +69,12 @@ def startup() -> None:
     if config.APP_MODE in {"server", "cloud"}:
         try:
             maybe_daily_backup()
+            prune_full_backups()
         except Exception:  # noqa: BLE001 - service must still start
             import logging
             logging.getLogger(__name__).exception("Automatic daily backup failed")
+        # Long-running processes keep taking daily backups without restarts.
+        start_auto_backup_scheduler()
 
 
 @app.get("/api/health")

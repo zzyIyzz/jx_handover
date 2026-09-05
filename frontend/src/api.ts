@@ -63,9 +63,15 @@ export interface BackupResult {
 export interface BackupItem extends BackupResult {
   local_present: boolean; verified_at?: string; nas_synced_at?: string; application_version?: string
 }
+export interface AutoBackupView {
+  scheduler_started: boolean; check_interval_seconds: number
+  keep_daily: number; keep_manual: number
+  last_run_at: string; last_error: string; daily_created: boolean; removed: string[]
+}
 export interface BackupStatusView {
   total: number; pending_nas: number; latest_local_at: string | null; latest_local_id: string | null
   latest_nas_at: string | null; latest_nas_id: string | null; nas_configured: boolean
+  auto_backup?: AutoBackupView
 }
 export interface RestoreRequestView {
   state: string; backup_id?: string; requested_by?: string; requested_at?: string
