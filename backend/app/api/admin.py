@@ -5,8 +5,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import shutil
 import sqlite3
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app import config
@@ -94,6 +96,60 @@ def accounts(db: Session = Depends(get_db)):
         _account_row(staff)
         for staff in db.query(Staff).order_by(Staff.name, Staff.id).all()
     ]
+
+
+class StaffPatchReq(BaseModel):
+    name: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+@router.patch("/accounts/{staff_id}")
+def patch_account(
+    staff_id: int,
+    req: StaffPatchReq,
+    db: Session = Depends(get_db),
+    identity: Identity = Depends(require_admin),
+):
+    """Rename personnel or enable/disable them; your own account and administrator names cannot be changed."""
+    staff = db.get(Staff, staff_id)
+    if staff is None:
+        raise HTTPException(404, "人员账号不存在。")
+    if identity.staff_id == staff.id:
+        raise HTTPException(409, "不能在人员管理中修改自己的账号。")
+    if req.name is not None:
+        clean_name = req.name.strip()
+        if not clean_name:
+            raise HTTPException(422, "人员姓名不能为空。")
+        if clean_name != staff.name:
+            if staff.name in config.ADMIN_NAMES:
+                raise HTTPException(409, "该姓名在 JX_ADMIN_NAMES 中配置为管理员，不允许改名。")
+            duplicate = (
+                db.query(Staff)
+                .filter(Staff.is_active == 1, Staff.name == clean_name)
+                .first()
+            )
+            if duplicate is not None:
+                raise HTTPException(409, "已有同名启用人员，请先调整姓名。")
+            staff.name = clean_name
+    if req.is_active is not None and bool(req.is_active) != bool(staff.is_active):
+        if req.is_active:
+            duplicate = (
+                db.query(Staff)
+                .filter(Staff.is_active == 1, Staff.name == staff.name)
+                .first()
+            )
+            if duplicate is not None:
+                raise HTTPException(409, "已有同名启用人员，请先处理该账号后再启用。")
+            staff.is_active = 1
+            # Bump the version so sessions from before the disable never revive.
+            staff.session_version = max(1, int(staff.session_version or 0)) + 1
+        else:
+            if staff.name in config.ADMIN_NAMES:
+                raise HTTPException(409, "该姓名在 JX_ADMIN_NAMES 中配置为管理员，不允许停用。")
+            staff.is_active = 0
+    db.commit()
+    db.refresh(staff)
+    return _account_row(staff)
 
 
 @router.post("/accounts/{staff_id}/reset-password")

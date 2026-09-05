@@ -167,6 +167,11 @@ export const api = {
   adminAccounts: () => http.get<AccountView[]>('/admin/accounts').then(r => r.data),
   adminResetPassword: (staffId: number) =>
     http.post<AccountView>(`/admin/accounts/${staffId}/reset-password`).then(r => r.data),
+  adminPatchAccount: (staffId: number, fields: { name?: string; is_active?: boolean }) =>
+    http.patch<AccountView>(`/admin/accounts/${staffId}`, fields).then(r => r.data),
+  staffAdd: (name: string) =>
+    http.post<Staff>('/staff', { station_code: 'REGION', name, role: '', note: '' })
+      .then(r => r.data),
   adminAiStatus: () => http.get<AiAdminStatus>('/admin/ai').then(r => r.data),
   adminAiTest: () => http.post<AiConnectionResult>('/admin/ai/test', {}, { timeout: 120000 }).then(r => r.data),
   adminAudit: (limit = 30) => http.get<AuditEventView[]>('/admin/audit', { params: { limit } }).then(r => r.data),

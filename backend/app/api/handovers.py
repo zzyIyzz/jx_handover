@@ -8,7 +8,12 @@ from sqlalchemy.orm import Session
 from app import config
 from app.db import get_db
 from app.models import DocumentSnapshot, Staff, Station
-from app.security import initialize_staff_password, require_identity
+from app.security import (
+    Identity,
+    initialize_staff_password,
+    require_admin,
+    require_identity,
+)
 from app.services import handover_service as hs, periodic
 from app.services.document import publish
 
@@ -128,7 +133,7 @@ class PatchGeneralReq(BaseModel):
 class StaffReq(BaseModel):
     station_code: str
     name: str
-    role: str
+    role: str = ""
     note: Optional[str] = None
 
 
@@ -317,7 +322,8 @@ def list_staff(station_code: Optional[str] = None,
 
 
 @router.post("/staff")
-def add_staff(req: StaffReq, db: Session = Depends(get_db)):
+def add_staff(req: StaffReq, db: Session = Depends(get_db),
+              _: Identity = Depends(require_admin)):
     clean_name = req.name.strip()
     if not clean_name:
         raise HTTPException(422, "人员姓名不能为空。")

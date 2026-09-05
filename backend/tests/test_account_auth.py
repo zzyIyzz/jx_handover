@@ -306,6 +306,112 @@ class AccountAuthTest(unittest.TestCase):
         finally:
             db.close()
 
+    def test_admin_can_rename_and_disable_staff_while_guards_hold(self):
+        with mock.patch.multiple(config, **self.settings), mock.patch(
+            "app.audit.SessionLocal", self.Session
+        ):
+            with TestClient(
+                self.app,
+                base_url="https://handover.example.test:1215",
+            ) as admin_client, TestClient(
+                self.app,
+                base_url="https://handover.example.test:1215",
+            ) as operator_client:
+                self.assertEqual(
+                    self._login(admin_client, "测试管理员", INITIAL_PASSWORD).status_code,
+                    200,
+                )
+                self.assertEqual(
+                    self._change(admin_client, INITIAL_PASSWORD, ADMIN_PASSWORD).status_code,
+                    200,
+                )
+                self.assertEqual(
+                    self._login(operator_client, "测试值班员", INITIAL_PASSWORD).status_code,
+                    200,
+                )
+                self.assertEqual(
+                    self._change(
+                        operator_client, INITIAL_PASSWORD, OPERATOR_PASSWORD
+                    ).status_code,
+                    200,
+                )
+
+                forbidden_add = operator_client.post("/api/staff", json={
+                    "station_code": "REGION",
+                    "name": "越权人员",
+                })
+                self.assertEqual(forbidden_add.status_code, 403)
+                forbidden_patch = operator_client.patch(
+                    f"/api/admin/accounts/{self.operator_id}",
+                    json={"name": "越权改名"},
+                )
+                self.assertEqual(forbidden_patch.status_code, 403)
+
+                renamed = admin_client.patch(
+                    f"/api/admin/accounts/{self.operator_id}",
+                    json={"name": "测试值班员二"},
+                )
+                self.assertEqual(renamed.status_code, 200)
+                self.assertEqual(renamed.json()["name"], "测试值班员二")
+                self.assertEqual(operator_client.get("/api/handovers").status_code, 401)
+                self.assertEqual(
+                    self._login(
+                        operator_client, "测试值班员", OPERATOR_PASSWORD
+                    ).status_code,
+                    401,
+                )
+                self.assertEqual(
+                    self._login(
+                        operator_client, "测试值班员二", OPERATOR_PASSWORD
+                    ).status_code,
+                    200,
+                )
+
+                duplicate = admin_client.patch(
+                    f"/api/admin/accounts/{self.operator_id}",
+                    json={"name": "测试管理员"},
+                )
+                self.assertEqual(duplicate.status_code, 409)
+                blank = admin_client.patch(
+                    f"/api/admin/accounts/{self.operator_id}", json={"name": "  "}
+                )
+                self.assertEqual(blank.status_code, 422)
+
+                admin_rename = admin_client.patch(
+                    f"/api/admin/accounts/{self.admin_id}", json={"name": "新管理员"}
+                )
+                self.assertEqual(admin_rename.status_code, 409)
+                admin_disable = admin_client.patch(
+                    f"/api/admin/accounts/{self.admin_id}", json={"is_active": False}
+                )
+                self.assertEqual(admin_disable.status_code, 409)
+
+                disabled = admin_client.patch(
+                    f"/api/admin/accounts/{self.operator_id}",
+                    json={"is_active": False},
+                )
+                self.assertEqual(disabled.status_code, 200)
+                self.assertFalse(disabled.json()["is_active"])
+                self.assertEqual(operator_client.get("/api/handovers").status_code, 401)
+                self.assertEqual(
+                    self._login(
+                        operator_client, "测试值班员二", OPERATOR_PASSWORD
+                    ).status_code,
+                    401,
+                )
+                enabled = admin_client.patch(
+                    f"/api/admin/accounts/{self.operator_id}", json={"is_active": True}
+                )
+                self.assertEqual(enabled.status_code, 200)
+                self.assertTrue(enabled.json()["is_active"])
+                self.assertEqual(operator_client.get("/api/handovers").status_code, 401)
+                self.assertEqual(
+                    self._login(
+                        operator_client, "测试值班员二", OPERATOR_PASSWORD
+                    ).status_code,
+                    200,
+                )
+
     def test_account_directory_rejects_duplicate_names_and_missing_admin(self):
         db = self.Session()
         try:

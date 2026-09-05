@@ -152,13 +152,18 @@
       </section>
     </div>
 
-    <section v-if="isCloud" class="account-card">
+    <section v-if="accountLoginEnabled" class="account-card">
       <div class="audit-heading">
         <div>
           <h4>人员账号与登录状态</h4>
-          <p>账号就是人员姓名。初始密码只能首次登录使用；重置密码会立即让该人员所有旧登录失效。</p>
+          <p>账号就是人员姓名。可在此添加人员、改名或停用/启用；初始密码只能首次登录使用，重置密码会立即让该人员所有旧登录失效。</p>
         </div>
         <el-tag effect="plain">{{ accountRows.length }} 个账号</el-tag>
+      </div>
+      <div class="account-toolbar">
+        <el-input v-model="newStaffName" size="small" placeholder="新人员姓名（即登录账号）" style="width: 220px" />
+        <el-button size="small" type="primary" :loading="addingStaff" @click="addStaff">添加人员</el-button>
+        <span class="toolbar-hint">停用后该人员无法登录，可随时再启用；改名会立即让其旧登录失效。</span>
       </div>
       <el-table v-if="accountRows.length" :data="accountRows" max-height="360" size="small" row-key="staff_id">
         <el-table-column prop="name" label="姓名/账号" min-width="120" />
@@ -177,8 +182,15 @@
         <el-table-column label="最后登录" min-width="165">
           <template #default="{ row }">{{ row.last_login_at ? cnDateTime(row.last_login_at) : '尚未登录' }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="160" fixed="right" align="center">
+        <el-table-column label="操作" width="232" fixed="right" align="center">
           <template #default="{ row }">
+            <el-button link type="primary" :disabled="row.staff_id === currentStaffId" @click="renameStaff(row)">
+              改名
+            </el-button>
+            <el-button link :type="row.is_active ? 'danger' : 'success'"
+                       :disabled="row.staff_id === currentStaffId" @click="toggleStaff(row)">
+              {{ row.is_active ? '停用' : '启用' }}
+            </el-button>
             <el-button link type="warning"
                        :disabled="!row.is_active || row.staff_id === currentStaffId"
                        :loading="busyAccountId === row.staff_id" @click="resetAccount(row)">
@@ -283,6 +295,8 @@ const backingUp = ref(false)
 const cancellingRestore = ref(false)
 const busyBackupId = ref('')
 const busyAccountId = ref<number | null>(null)
+const newStaffName = ref('')
+const addingStaff = ref(false)
 const loadError = ref('')
 const aiStatus = ref<AiAdminStatus | null>(null)
 const aiTestResult = ref<AiConnectionResult | null>(null)
@@ -294,6 +308,8 @@ const accountRows = ref<AccountView[]>([])
 const backupRows = ref<BackupItem[]>([])
 const backupResult = ref<BackupResult | null>(null)
 const isCloud = computed(() => diagnostics.value?.mode === 'cloud')
+const accountLoginEnabled = computed(() => diagnostics.value?.mode === 'server'
+  || diagnostics.value?.mode === 'cloud')
 const restartInstruction = computed(() => restoreState.value?.pending?.instruction
   || (isCloud.value
     ? '请联系管理员重启云端应用；系统会先备份当前数据，再执行恢复。'
@@ -487,6 +503,81 @@ async function resetAccount(row: AccountView) {
   }
 }
 
+async function addStaff() {
+  const name = newStaffName.value.trim()
+  if (!name) {
+    ElMessage.warning('请先输入新人员姓名。')
+    return
+  }
+  addingStaff.value = true
+  try {
+    await api.staffAdd(name)
+    newStaffName.value = ''
+    accountRows.value = await api.adminAccounts()
+    await loadAuditOnly()
+    ElMessage.success(`已添加账号 ${name}；请告知其使用初始密码登录并立即修改。`)
+  } catch (error: any) {
+    const detail = error?.response?.data?.detail
+    ElMessage.error(typeof detail === 'string' ? detail : detail?.message || '添加人员失败')
+  } finally {
+    addingStaff.value = false
+  }
+}
+
+async function renameStaff(row: AccountView) {
+  let name = ''
+  try {
+    const result = await ElMessageBox.prompt(
+      `请输入“${row.name}”的新姓名；改名后其所有已登录设备会立即退出。`,
+      '人员改名',
+      {
+        confirmButtonText: '确认改名',
+        cancelButtonText: '取消',
+        inputValue: row.name,
+        inputValidator: (value: string) => (value && value.trim() ? true : '姓名不能为空'),
+      }
+    )
+    name = String(result.value).trim()
+  } catch (action) {
+    if (action === 'cancel' || action === 'close') return
+    throw action
+  }
+  try {
+    await api.adminPatchAccount(row.staff_id, { name })
+    accountRows.value = await api.adminAccounts()
+    await loadAuditOnly()
+    ElMessage.success(`${row.name} 已改名为 ${name}。`)
+  } catch (error: any) {
+    const detail = error?.response?.data?.detail
+    ElMessage.error(typeof detail === 'string' ? detail : detail?.message || '改名失败')
+  }
+}
+
+async function toggleStaff(row: AccountView) {
+  const disabling = row.is_active
+  try {
+    await ElMessageBox.confirm(
+      disabling
+        ? `确认停用“${row.name}”？其将无法登录，已登录设备会立即退出；后续可随时再启用。`
+        : `确认重新启用“${row.name}”？启用后其可再次登录系统。`,
+      disabling ? '停用人员' : '启用人员',
+      { type: 'warning', confirmButtonText: disabling ? '确认停用' : '确认启用', cancelButtonText: '取消' }
+    )
+  } catch (action) {
+    if (action === 'cancel' || action === 'close') return
+    throw action
+  }
+  try {
+    await api.adminPatchAccount(row.staff_id, { is_active: !disabling })
+    accountRows.value = await api.adminAccounts()
+    await loadAuditOnly()
+    ElMessage.success(`${row.name} 已${disabling ? '停用' : '启用'}。`)
+  } catch (error: any) {
+    const detail = error?.response?.data?.detail
+    ElMessage.error(typeof detail === 'string' ? detail : detail?.message || '状态修改失败')
+  }
+}
+
 function accountState(row: AccountView): { label: string; type: 'success' | 'warning' | 'info' | 'danger' } {
   if (!row.is_active) return { label: '已停用', type: 'info' }
   if (!row.password_initialized) return { label: '未初始化', type: 'danger' }
@@ -579,6 +670,8 @@ function auditAction(method: string, path: string) {
 .button-row { display: flex; flex-wrap: wrap; gap: 8px; }
 .account-card, .backup-card, .audit-card { margin-top: 14px; background: #fff; }
 .audit-heading { margin-bottom: 12px; }
+.account-toolbar { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; }
+.toolbar-hint { color: #748599; font-size: 12px; }
 @media (max-width: 760px) {
   .admin-grid { grid-template-columns: 1fr; }
   .admin-intro, .audit-heading, .restore-alert-copy { flex-direction: column; }
