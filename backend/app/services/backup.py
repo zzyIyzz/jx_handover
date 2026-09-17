@@ -542,7 +542,8 @@ def list_full_backups() -> list[dict]:
 
 def backup_status() -> dict:
     backups = list_full_backups()
-    latest = backups[0] if backups else None
+    latest = next((item for item in backups
+                   if item.get("local_present") and item.get("verification") == "verified"), None)
     latest_synced = next(
         (item for item in backups if item.get("nas_state") == "synced"), None
     )

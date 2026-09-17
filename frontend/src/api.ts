@@ -2,6 +2,28 @@ import axios from 'axios'
 
 export const http = axios.create({ baseURL: '/api', timeout: 60000 })
 
+// Deliberately never persist credentials in cookies or browser storage.
+let pageSessionToken = ''
+export function clearPageSession() { pageSessionToken = '' }
+http.interceptors.request.use(request => {
+  if (pageSessionToken) request.headers.set('Authorization', `Bearer ${pageSessionToken}`)
+  return request
+})
+function acceptSession(state: SessionState): SessionState {
+  pageSessionToken = state.session_token || ''
+  return state
+}
+
+export async function downloadFile(url: string, filename: string) {
+  const response = await http.get(url.replace(/^\/api/, ''), { responseType: 'blob' })
+  const objectUrl = URL.createObjectURL(response.data)
+  const anchor = document.createElement('a')
+  anchor.href = objectUrl
+  anchor.download = filename
+  anchor.click()
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 1000)
+}
+
 let connectionUnavailable = false
 
 function publishConnectionState(online: boolean) {
@@ -24,6 +46,7 @@ http.interceptors.response.use(
       error?.response?.status === 401
       && error?.response?.data?.detail?.code === 'LOGIN_REQUIRED'
     ) {
+      clearPageSession()
       window.dispatchEvent(new CustomEvent('jx-session-expired'))
     }
     return Promise.reject(error)
@@ -35,6 +58,7 @@ export interface SessionOptions {
   mode: 'desktop' | 'server' | 'cloud'; staff_names: string[]
 }
 export interface SessionState {
+  session_token?: string
   authenticated: boolean; name?: string; role?: 'admin' | 'operator'; staff_id?: number
   password_change_required?: boolean
 }
@@ -86,6 +110,9 @@ export interface NasTestView {
   latency_ms: number | null; message: string
 }
 export interface DiagnosticsView {
+  version: string; account_login_enabled: boolean
+  oss: { state: string; message: string; updated_at: string | null; last_success_at: string | null
+    synced_count: number; latest_backup_at: string | null; target: string; stale: boolean }
   checked_at: string; mode: 'desktop' | 'server' | 'cloud'; service_identity: string; public_url: string; data_root: string
   database_path: string; database_size: number; database_check: string
   disk_total: number; disk_used: number; disk_free: number; disk_free_percent: number
@@ -164,12 +191,12 @@ export const api = {
   sessionOptions: () => http.get<SessionOptions>('/session/options').then(r => r.data),
   sessionMe: () => http.get<SessionState>('/session/me').then(r => r.data),
   sessionLogin: (name: string, password = '', accessCode = '') =>
-    http.post<SessionState>('/session/login', { name, password, access_code: accessCode }).then(r => r.data),
+    http.post<SessionState>('/session/login', { name, password, access_code: accessCode }).then(r => acceptSession(r.data)),
   sessionChangePassword: (currentPassword: string, newPassword: string) =>
     http.post<SessionState>('/session/change-password', {
       current_password: currentPassword, new_password: newPassword
-    }).then(r => r.data),
-  sessionLogout: () => http.post<SessionState>('/session/logout').then(r => r.data),
+    }).then(r => acceptSession(r.data)),
+  sessionLogout: () => http.post<SessionState>('/session/logout').then(r => r.data).finally(clearPageSession),
   adminAccounts: () => http.get<AccountView[]>('/admin/accounts').then(r => r.data),
   adminResetPassword: (staffId: number) =>
     http.post<AccountView>(`/admin/accounts/${staffId}/reset-password`).then(r => r.data),

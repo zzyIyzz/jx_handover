@@ -57,6 +57,27 @@
       class="admin-alert"
     />
 
+    <div v-if="diagnostics" class="overview-grid">
+      <section class="admin-card">
+        <h4>当前服务版本</h4>
+        <strong class="overview-value">V{{ diagnostics.version }}</strong>
+        <p>{{ { cloud: '云服务器', server: '局域网服务器', desktop: '本机' }[diagnostics.mode] }} · {{ diagnostics.account_login_enabled ? '个人账号登录' : '共享身份模式' }}</p>
+        <small>状态检查：{{ cnDateTime(diagnostics.checked_at) }}</small>
+      </section>
+      <section class="admin-card">
+        <h4>最近完整备份</h4>
+        <strong class="overview-value">{{ diagnostics.backup.latest_local_at ? cnDateTime(diagnostics.backup.latest_local_at) : '尚未备份' }}</strong>
+        <p>{{ autoBackupLabel }}</p>
+        <small>本地保留 {{ diagnostics.backup.total }} 份 · 不代表已上传 OSS</small>
+      </section>
+      <section class="admin-card">
+        <h4>OSS 同步结果</h4>
+        <el-tag :type="ossTagType">{{ ossLabel }}</el-tag>
+        <p>{{ diagnostics.oss.message }}</p>
+        <small>最近成功：{{ diagnostics.oss.last_success_at ? cnDateTime(diagnostics.oss.last_success_at) : '尚无记录' }}</small>
+      </section>
+    </div>
+
     <div class="admin-grid">
       <section class="admin-card">
         <div class="card-heading">
@@ -131,10 +152,13 @@
         <template v-if="diagnostics">
           <dl class="status-list">
             <div><dt>配置状态</dt><dd>{{ isCloud ? '宿主机脚本管理' : diagnostics.nas.configured ? '已配置' : '未配置' }}</dd></div>
-            <div><dt>待同步备份</dt><dd :class="diagnostics.backup.pending_nas ? 'bad' : 'good'">{{ diagnostics.backup.pending_nas }} 个</dd></div>
+            <div v-if="!isCloud"><dt>待同步备份</dt><dd :class="diagnostics.backup.pending_nas ? 'bad' : 'good'">{{ diagnostics.backup.pending_nas }} 个</dd></div>
+            <div v-if="isCloud"><dt>本次同步数量</dt><dd>{{ diagnostics.oss.synced_count }} 组</dd></div>
+            <div v-if="isCloud"><dt>最近任务回执</dt><dd>{{ diagnostics.oss.updated_at ? cnDateTime(diagnostics.oss.updated_at) : '尚无记录' }}</dd></div>
+            <div v-if="isCloud"><dt>最近成功备份时间</dt><dd>{{ diagnostics.oss.latest_backup_at ? cnDateTime(diagnostics.oss.latest_backup_at) : '尚无记录' }}</dd></div>
             <div><dt>最近本地备份</dt><dd>{{ diagnostics.backup.latest_local_at ? cnDateTime(diagnostics.backup.latest_local_at) : '尚无' }}</dd></div>
             <div><dt>自动备份</dt><dd :class="diagnostics.backup.auto_backup?.last_error ? 'bad' : 'good'">{{ autoBackupLabel }}</dd></div>
-            <div><dt>{{ isCloud ? 'OSS 状态' : '最近 NAS 同步' }}</dt><dd>{{ isCloud ? '请查看宝塔计划任务日志' : diagnostics.backup.latest_nas_at ? cnDateTime(diagnostics.backup.latest_nas_at) : '尚无' }}</dd></div>
+            <div><dt>{{ isCloud ? 'OSS 状态' : '最近 NAS 同步' }}</dt><dd>{{ isCloud ? ossLabel : diagnostics.backup.latest_nas_at ? cnDateTime(diagnostics.backup.latest_nas_at) : '尚无' }}</dd></div>
           </dl>
         </template>
         <div v-if="!isCloud" class="button-row">
@@ -309,8 +333,15 @@ const accountRows = ref<AccountView[]>([])
 const backupRows = ref<BackupItem[]>([])
 const backupResult = ref<BackupResult | null>(null)
 const isCloud = computed(() => diagnostics.value?.mode === 'cloud')
-const accountLoginEnabled = computed(() => diagnostics.value?.mode === 'server'
-  || diagnostics.value?.mode === 'cloud')
+const accountLoginEnabled = computed(() => diagnostics.value?.account_login_enabled)
+const ossLabel = computed(() => {
+  const oss = diagnostics.value?.oss
+  if (oss?.stale) return '状态已过期'
+  return ({ success: '同步成功', running: '正在同步', failed: '同步失败', invalid: '记录异常', unknown: '尚无记录' } as Record<string, string>)[oss?.state || 'unknown'] || '尚无记录'
+})
+const ossTagType = computed(() => diagnostics.value?.oss.stale ? 'warning'
+  : diagnostics.value?.oss.state === 'success' ? 'success'
+  : diagnostics.value?.oss.state === 'failed' || diagnostics.value?.oss.state === 'invalid' ? 'danger' : 'info')
 const restartInstruction = computed(() => restoreState.value?.pending?.instruction
   || (isCloud.value
     ? '请联系管理员重启云端应用；系统会先备份当前数据，再执行恢复。'
@@ -320,16 +351,20 @@ async function loadAdminData() {
   loading.value = true
   loadError.value = ''
   try {
-    const [status, audit, backups, health, restore, accounts] = await Promise.all([
+    const results = await Promise.allSettled([
       api.adminAiStatus(), api.adminAudit(30), api.adminBackups(),
       api.adminDiagnostics(), api.adminRestoreState(), api.adminAccounts()
-    ])
-    aiStatus.value = status
-    auditRows.value = audit
-    backupRows.value = backups
-    diagnostics.value = health
-    restoreState.value = restore
-    accountRows.value = accounts
+    ] as const)
+    const [status, audit, backups, health, restore, accounts] = results
+    if (status.status === 'fulfilled') aiStatus.value = status.value
+    if (audit.status === 'fulfilled') auditRows.value = audit.value
+    if (backups.status === 'fulfilled') backupRows.value = backups.value
+    if (health.status === 'fulfilled') diagnostics.value = health.value
+    if (restore.status === 'fulfilled') restoreState.value = restore.value
+    if (accounts.status === 'fulfilled') accountRows.value = accounts.value
+    const labels = ['AI 配置', '操作记录', '备份列表', '运行状态', '恢复状态', '人员账号']
+    const failed = results.flatMap((result, index) => result.status === 'rejected' ? [labels[index]] : [])
+    if (failed.length) loadError.value = `${failed.join('、')}加载失败，其余信息已显示；请检查连接或权限后刷新。`
   } catch (error: any) {
     if (error?.response?.status === 403) loadError.value = '当前身份没有管理员权限。'
     else loadError.value = error?.response?.data?.detail || '管理信息加载失败，请检查服务器连接。'
@@ -611,7 +646,8 @@ const autoBackupLabel = computed(() => {
   if (!auto) return '——'
   if (auto.last_error) return `上次自动备份异常：${auto.last_error}`
   const intervalMin = Math.max(1, Math.round(auto.check_interval_seconds / 60))
-  return `常驻调度（每 ${intervalMin} 分钟检查），每日一份；本地保留 daily ${auto.keep_daily} 份 / manual ${auto.keep_manual} 份`
+  if (!auto.scheduler_started) return '自动备份未启动，请检查服务运行方式'
+  return `每天自动备份（每 ${intervalMin} 分钟检查）；保留每日备份 ${auto.keep_daily} 份、其他备份 ${auto.keep_manual} 份`
 })
 
 function nasStateLabel(state: string) {
@@ -644,6 +680,12 @@ function auditAction(method: string, path: string) {
 </script>
 
 <style scoped>
+.overview-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin: 18px 0; }
+.overview-grid h4 { margin: 0 0 12px; }
+.overview-grid p { color: #526579; line-height: 1.7; }
+.overview-grid small { color: #6b7c8f; }
+.overview-value { display: block; font-size: 20px; color: #173856; overflow-wrap: anywhere; }
+@media (max-width: 760px) { .overview-grid { grid-template-columns: 1fr; } }
 .admin-intro, .audit-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
 .admin-intro { margin-bottom: 16px; }
 .admin-kicker { color: #2d6eaa; font-size: 11px; font-weight: 800; letter-spacing: .12em; }

@@ -218,7 +218,7 @@
             <el-button type="primary" size="large" :loading="rendering" :disabled="pendingTotal > 0" @click="generateWord">校验并生成 Word</el-button>
             <el-dropdown v-if="currentStation.snapshots.length">
               <el-button size="large">历史版本（{{ currentStation.snapshots.length }}）⌄</el-button>
-              <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="snapshot in currentStation.snapshots" :key="snapshot.id"><a :href="api.downloadUrl(snapshot.id)" target="_blank">V{{ snapshot.version }} · {{ cnDateTime(snapshot.created_at) }}</a></el-dropdown-item></el-dropdown-menu></template>
+              <template #dropdown><el-dropdown-menu><el-dropdown-item v-for="snapshot in currentStation.snapshots" :key="snapshot.id" @click="downloadDocument(api.downloadUrl(snapshot.id), `交接班记录_V${snapshot.version}.docx`)">V{{ snapshot.version }} · {{ cnDateTime(snapshot.created_at) }}</el-dropdown-item></el-dropdown-menu></template>
             </el-dropdown>
           </div>
         </section>
@@ -265,7 +265,7 @@
       <el-dialog v-model="importDialog" title="预览导入第三、四、五章" width="min(1180px, calc(100vw - 24px))" top="4vh" destroy-on-close>
         <div v-if="!importPreview" class="import-start">
           <el-alert title="先解析预览，不会直接写入正式数据。实际工作日志和标准模板都可以使用。" type="info" :closable="false" show-icon />
-          <a class="template-download" :href="api.handoverTemplateUrl()" target="_blank">下载标准导入模板（第三章、第四章、第五章）</a>
+          <el-button link type="primary" @click="downloadDocument(api.handoverTemplateUrl(), '交接班标准导入模板.xlsx')">下载标准导入模板（第三章、第四章、第五章）</el-button>
           <el-upload drag :auto-upload="false" accept=".xlsx" :limit="1" :file-list="importFiles"
                      :on-change="onImportFile" :on-remove="clearImportFile" :on-exceed="importExceed">
             <div class="upload-icon">⇧</div><div class="el-upload__text">拖入 XLSX，或 <em>点击选择</em></div>
@@ -332,7 +332,7 @@ import { computed, defineComponent, h, onBeforeUnmount, onMounted, reactive, ref
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, ElOption, ElSelect } from 'element-plus'
 import {
-  api, cnDate, cnDateTime, COLOR_HEX, ITEM_STATUS_LABEL, PRIORITY_LABEL, REVIEW_LABEL,
+  api, downloadFile, cnDate, cnDateTime, COLOR_HEX, ITEM_STATUS_LABEL, PRIORITY_LABEL, REVIEW_LABEL,
   type BatchDetail, type DeviceChangeView, type ExternalAssessmentView, type GeneralItemView,
   type HandoverItemView, type ImportPreview, type ImportPreviewRow, type SourceRow,
   type Staff, type StationDetail
@@ -577,13 +577,17 @@ async function saveGeneral(row: GeneralItemView, fields: Record<string, unknown>
 }
 
 const rendering = ref(false)
+async function downloadDocument(url: string, name: string) {
+  try { await downloadFile(url, name) }
+  catch (error) { ElMessage.error(friendlyError(error, '下载失败，请确认登录状态后重试')) }
+}
 async function generateWord() {
   if (!currentStation.value) return
   if (pendingTotal.value) return ElMessage.warning(`还有 ${pendingTotal.value} 条事项待复核`)
   rendering.value = true
   try {
     const result = await api.render(batchId, currentStation.value.station_meta_id)
-    const anchor = document.createElement('a'); anchor.href = api.downloadUrl(result.snapshot_id); anchor.target = '_blank'; anchor.click()
+    await downloadFile(api.downloadUrl(result.snapshot_id), `交接班记录_V${result.version}.docx`)
     await load(); ElMessage.success(`Word V${result.version} 已通过结构校验并生成`)
   } catch (error) { ElMessage.error(friendlyError(error, 'Word 生成失败')) }
   finally { rendering.value = false }

@@ -46,10 +46,14 @@ def _identity_payload(identity: Identity) -> dict:
 
 
 def _set_session_cookie(response: Response, identity: Identity) -> None:
+    response.headers["Cache-Control"] = "no-store"
+    if config.ACCOUNT_LOGIN_ENABLED:
+        response.delete_cookie(COOKIE_NAME, path="/", secure=config.COOKIE_SECURE,
+                               httponly=True, samesite="strict")
+        return
     response.set_cookie(
         COOKIE_NAME,
         issue_session(identity),
-        max_age=config.SESSION_TTL_HOURS * 3600,
         httponly=True,
         samesite="strict",
         secure=config.COOKIE_SECURE,
@@ -69,7 +73,7 @@ def session_options(db: Session = Depends(get_db)):
             .all()
         ]
     return {
-        "auth_required": config.AUTH_REQUIRED,
+        "auth_required": config.AUTH_REQUIRED or config.ACCOUNT_LOGIN_ENABLED,
         "login_mode": "account" if config.ACCOUNT_LOGIN_ENABLED else "shared",
         "access_code_required": bool(
             config.ACCESS_CODE and not config.ACCOUNT_LOGIN_ENABLED
@@ -82,7 +86,7 @@ def session_options(db: Session = Depends(get_db)):
 @router.get("/me")
 def current_session(request: Request, db: Session = Depends(get_db)):
     identity = validated_identity_from_request(request, db)
-    if identity is None and not config.AUTH_REQUIRED:
+    if identity is None and not config.AUTH_REQUIRED and not config.ACCOUNT_LOGIN_ENABLED:
         return {"authenticated": True, "name": "本机用户", "role": "admin"}
     if identity is None:
         return {"authenticated": False}
@@ -109,7 +113,8 @@ def login(
         raise
     record_login_success(login_keys)
     _set_session_cookie(response, identity)
-    return {"authenticated": True, **_identity_payload(identity)}
+    return {"authenticated": True, **_identity_payload(identity),
+            "session_token": issue_session(identity) if config.ACCOUNT_LOGIN_ENABLED else None}
 
 
 @router.post("/change-password")
@@ -126,11 +131,19 @@ def change_password(
         new_password=req.new_password,
     )
     _set_session_cookie(response, updated)
-    return {"authenticated": True, **_identity_payload(updated)}
+    return {"authenticated": True, **_identity_payload(updated),
+            "session_token": issue_session(updated) if config.ACCOUNT_LOGIN_ENABLED else None}
 
 
 @router.post("/logout")
-def logout(response: Response):
+def logout(request: Request, response: Response, db: Session = Depends(get_db)):
+    identity = validated_identity_from_request(request, db)
+    if config.ACCOUNT_LOGIN_ENABLED and identity and identity.staff_id:
+        staff = db.get(Staff, identity.staff_id)
+        if staff:
+            staff.session_version = int(staff.session_version or 0) + 1
+            db.commit()
+    response.headers["Cache-Control"] = "no-store"
     response.delete_cookie(
         COOKIE_NAME,
         path="/",

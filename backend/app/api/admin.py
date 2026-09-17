@@ -16,6 +16,7 @@ from app.db import get_db
 from app.models import AuditEvent, Staff
 from app.security import Identity, require_admin, reset_staff_password
 from app.services.ai.adapter import ai_configuration_status, test_qwen_connection
+from app.services.oss_status import oss_sync_status
 from app.services.backup import (
     backup_status,
     cancel_scheduled_restore,
@@ -276,6 +277,9 @@ def diagnostics(
     )
     return {
         "checked_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "version": config.APP_VERSION,
+        "account_login_enabled": config.ACCOUNT_LOGIN_ENABLED,
+        "oss": oss_sync_status(),
         "mode": config.APP_MODE,
         "service_identity": service_identity(),
         "public_url": config.PUBLIC_URL,

@@ -104,16 +104,49 @@ class AccountAuthTest(unittest.TestCase):
         self.engine.dispose()
 
     def _login(self, client: TestClient, name: str, password: str):
-        return client.post(
+        response = client.post(
             "/api/session/login",
             json={"name": name, "password": password},
         )
+        if response.status_code == 200:
+            client.headers['Authorization'] = 'Bearer ' + response.json()['session_token']
+        return response
 
     def _change(self, client: TestClient, current: str, new: str):
-        return client.post(
+        response = client.post(
             "/api/session/change-password",
             json={"current_password": current, "new_password": new},
         )
+        if response.status_code == 200:
+            client.headers['Authorization'] = 'Bearer ' + response.json()['session_token']
+        return response
+
+    def test_page_session_requires_header_and_logout_revokes_token(self):
+        with mock.patch.multiple(config, **self.settings):
+            with TestClient(self.app, base_url="https://handover.example.test:1215") as client:
+                response = self._login(client, "测试管理员", INITIAL_PASSWORD)
+                token = response.json()['session_token']
+                self.assertEqual(response.headers['cache-control'], 'no-store')
+                self.assertFalse(client.cookies.get(COOKIE_NAME))
+                self.assertTrue(client.get('/api/session/me').json()['authenticated'])
+                # Closing/reopening the page loses its in-memory header. Even a
+                # restored old browser cookie cannot authenticate the new page.
+                client.headers.pop('Authorization')
+                client.cookies.set(COOKIE_NAME, token)
+                self.assertFalse(client.get('/api/session/me').json()['authenticated'])
+                self.assertEqual(client.get('/api/handovers').status_code, 401)
+                client.headers['Authorization'] = 'Bearer ' + token
+                self.assertEqual(client.post('/api/session/logout').status_code, 200)
+                self.assertFalse(client.get('/api/session/me').json()['authenticated'])
+
+    def test_malformed_session_and_protected_downloads_fail_closed(self):
+        from app.security import decode_session
+        self.assertIsNone(decode_session('abc.非法签名'))
+        self.assertIsNone(decode_session('x' * 9000 + '.y'))
+        with mock.patch.multiple(config, **self.settings):
+            with TestClient(self.app, base_url="https://handover.example.test:1215") as client:
+                self.assertEqual(client.get('/api/documents/missing/download').status_code, 401)
+                self.assertEqual(client.get('/api/admin/diagnostics').status_code, 401)
 
     def test_first_login_forces_change_and_invalidates_old_session(self):
         self.assertNotEqual(self.admin_initial_hash, self.operator_initial_hash)
@@ -140,7 +173,7 @@ class AccountAuthTest(unittest.TestCase):
                 login = self._login(client, "测试管理员", INITIAL_PASSWORD)
                 self.assertEqual(login.status_code, 200)
                 self.assertTrue(login.json()["password_change_required"])
-                old_cookie = client.cookies.get(COOKIE_NAME)
+                old_cookie = login.json()['session_token']
                 self.assertTrue(old_cookie)
 
                 blocked = client.get("/api/handovers")
@@ -162,14 +195,14 @@ class AccountAuthTest(unittest.TestCase):
                 self.assertFalse(changed.json()["password_change_required"])
                 self.assertEqual(client.get("/api/handovers").status_code, 200)
 
-                current_cookie = client.cookies.get(COOKIE_NAME)
+                current_cookie = changed.json()['session_token']
                 self.assertNotEqual(old_cookie, current_cookie)
 
             with TestClient(
                 self.app,
                 base_url="https://handover.example.test:1215",
             ) as stale_client:
-                stale_client.cookies.set(COOKIE_NAME, old_cookie)
+                stale_client.headers['Authorization'] = 'Bearer ' + old_cookie
                 stale = stale_client.get("/api/handovers")
                 self.assertEqual(stale.status_code, 401)
                 self.assertEqual(stale.json()["detail"]["code"], "LOGIN_REQUIRED")

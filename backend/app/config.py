@@ -25,7 +25,7 @@ from urllib.parse import urlsplit
 from dotenv import load_dotenv
 
 
-APP_VERSION = os.getenv("JX_APP_VERSION", "0.5.1").strip() or "0.5.1"
+APP_VERSION = os.getenv("JX_APP_VERSION", "0.5.2").strip() or "0.5.2"
 
 
 def _env_bool(name: str, default: bool) -> bool:

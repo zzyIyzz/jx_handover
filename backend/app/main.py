@@ -94,7 +94,7 @@ def health():
         "version": APP_VERSION,
         "port": config.APP_PORT,
         "mode": config.APP_MODE,
-        "auth_required": config.AUTH_REQUIRED,
+        "auth_required": config.AUTH_REQUIRED or config.ACCOUNT_LOGIN_ENABLED,
         "login_mode": "account" if config.ACCOUNT_LOGIN_ENABLED else "shared",
     }
     if config.APP_MODE == "cloud":

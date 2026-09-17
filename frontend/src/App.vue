@@ -44,7 +44,7 @@
           {{ sessionOptions?.login_mode === 'account' ? '登录系统' : '进入系统' }}
         </el-button>
       </el-form>
-      <div class="login-note">Qwen API Key 只保存在服务器端，使用人员无需填写。</div>
+      <div class="login-note">关闭或刷新页面后需重新登录；页面内切换功能无需重复登录。忘记密码请联系管理员重置。</div>
     </section>
   </main>
 
@@ -113,7 +113,7 @@
               </el-dropdown-menu>
             </template>
           </el-dropdown>
-          <span class="version">V0.5.1 个人账号部署测试版</span>
+          <span class="version">V0.5.2 登录与管理中心</span>
         </div>
       </div>
     </el-header>
@@ -131,7 +131,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { api, type SessionOptions, type SessionState } from '@/api'
+import { api, clearPageSession, type SessionOptions, type SessionState } from '@/api'
 import AdminPanel from '@/components/AdminPanel.vue'
 
 const sessionLoading = ref(true)
@@ -167,6 +167,7 @@ async function loadSession() {
 }
 
 async function login() {
+  if (loginLoading.value) return
   const loginName = loginForm.name.trim()
   if (!loginName) return ElMessage.warning('请输入或选择自己的姓名')
   if (sessionOptions.value?.login_mode === 'account' && !loginForm.password) return ElMessage.warning('请输入个人密码')
@@ -178,11 +179,16 @@ async function login() {
       sessionOptions.value?.login_mode === 'account' ? loginForm.password : '',
       sessionOptions.value?.login_mode === 'shared' ? loginForm.accessCode : ''
     )
+    const verified = await api.sessionMe()
+    if (!verified.authenticated) throw new Error('登录验证未通过，请确认使用管理员提供的完整访问地址，或更新服务器与浏览器页面。')
+    session.value = verified
     loginForm.password = ''
     loginForm.accessCode = ''
     if (session.value.password_change_required) ElMessage.warning('这是初始密码，请先设置你自己的新密码。')
     else ElMessage.success(`欢迎，${session.value.name}`)
   } catch (error: any) {
+    clearPageSession()
+    session.value = { authenticated: false }
     ElMessage.error(apiErrorMessage(error, '无法登录，请检查姓名和密码。'))
   } finally { loginLoading.value = false }
 }
@@ -224,7 +230,9 @@ async function logoutCurrentIdentity() {
     Object.assign(passwordForm, { currentPassword: '', newPassword: '', confirmPassword: '' })
     ElMessage.success('已退出当前身份')
   } catch {
-    ElMessage.error('退出失败，请检查服务器连接后重试。')
+    ElMessage.warning('本页面已退出；服务器未响应，其他设备登录状态未能确认。')
+  } finally {
+    lockPage()
   }
 }
 
@@ -234,6 +242,9 @@ function cancelPasswordChange() {
 }
 
 function apiErrorMessage(error: any, fallback: string) {
+  if (error?.response?.status === 429) return `登录尝试过多，请约 ${Math.ceil(Number(error.response.headers['retry-after'] || 60) / 60)} 分钟后重试。`
+  if (error?.response?.status === 400) return '访问地址未被服务器允许，请使用管理员提供的完整地址（包括端口）。'
+  if (!error?.response && error?.message && !error?.isAxiosError) return error.message
   const detail = error?.response?.data?.detail
   return typeof detail === 'string' ? detail : detail?.message || fallback
 }
@@ -269,7 +280,17 @@ async function retryConnection() {
   }
 }
 
+function lockPage() {
+  clearPageSession()
+  session.value = { authenticated: false }
+  adminPanel.value = false
+  voluntaryPasswordChange.value = false
+  Object.assign(passwordForm, { currentPassword: '', newPassword: '', confirmPassword: '' })
+  loginForm.password = ''
+}
+
 onMounted(() => {
+  window.addEventListener('pagehide', lockPage)
   window.addEventListener('jx-session-expired', sessionExpired)
   window.addEventListener('jx-network-status', networkStatus)
   window.addEventListener('offline', browserOffline)
@@ -277,6 +298,7 @@ onMounted(() => {
   loadSession()
 })
 onBeforeUnmount(() => {
+  window.removeEventListener('pagehide', lockPage)
   window.removeEventListener('jx-session-expired', sessionExpired)
   window.removeEventListener('jx-network-status', networkStatus)
   window.removeEventListener('offline', browserOffline)

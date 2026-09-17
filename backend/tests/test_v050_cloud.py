@@ -99,6 +99,7 @@ with TestClient(app, base_url="https://handover.example.test:1215") as client:
         headers={"Origin": "https://handover.example.test:1215"},
         json={"name": "测试管理员", "password": "Cloud-test-password-2026!"},
     )
+    client.headers['Authorization'] = 'Bearer ' + login.json()['session_token']
     protected = client.get("/api/handovers")
     bad_host = client.get("/api/health", headers={"Host": "evil.example.test"})
     docs = client.get("/docs")
@@ -130,7 +131,7 @@ with TestClient(app, base_url="https://handover.example.test:1215") as client:
         self.assertTrue(result["cookie_secure"])
         self.assertEqual(result["health_status"], 200)
         self.assertEqual(result["health"]["status"], "ok")
-        self.assertEqual(result["health"]["version"], "0.5.1")
+        self.assertEqual(result["health"]["version"], "0.5.2")
         self.assertEqual(result["health"]["mode"], "cloud")
         self.assertEqual(result["health"]["port"], 8765)
         self.assertEqual(result["health"]["public_port"], 1215)

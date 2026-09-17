@@ -305,7 +305,7 @@ def issue_session(identity: Identity) -> str:
 
 
 def decode_session(token: str | None) -> Identity | None:
-    if not token or "." not in token:
+    if not token or len(token) > 8192 or not token.isascii() or "." not in token:
         return None
     encoded, signature = token.split(".", 1)
     expected = _b64_encode(
@@ -336,6 +336,9 @@ def decode_session(token: str | None) -> Identity | None:
 
 
 def identity_from_request(request: Request) -> Identity | None:
+    if config.ACCOUNT_LOGIN_ENABLED:
+        scheme, _, token = request.headers.get("authorization", "").partition(" ")
+        return decode_session(token) if scheme.lower() == "bearer" else None
     return decode_session(request.cookies.get(COOKIE_NAME))
 
 
@@ -379,7 +382,7 @@ def require_session_identity(
     identity = validated_identity_from_request(request, db)
     if identity is not None:
         return identity
-    if not config.AUTH_REQUIRED:
+    if not config.AUTH_REQUIRED and not config.ACCOUNT_LOGIN_ENABLED:
         return Identity(name="本机用户", role="admin")
     raise HTTPException(
         status_code=401,
