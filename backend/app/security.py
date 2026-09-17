@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -140,6 +141,30 @@ class Identity:
     password_change_required: bool = False
 
 
+def is_administrator(staff: Staff | None) -> bool:
+    """Administrator flag from the database, backed up by the server config.
+
+    Persisting the flag keeps the management page, backups and restore working
+    after a redeploy that loses ``JX_ADMIN_NAMES``; the environment value still
+    promotes its names on every startup so a fresh install is manageable.
+    """
+    if staff is None:
+        return False
+    return bool(getattr(staff, "is_admin", 0)) or config.is_admin_name(staff.name)
+
+
+def account_role(staff: Staff | None) -> str:
+    return "admin" if is_administrator(staff) else "operator"
+
+
+def count_administrators(db: Session) -> int:
+    return sum(
+        1
+        for staff in db.query(Staff).filter(Staff.is_active == 1).all()
+        if is_administrator(staff)
+    )
+
+
 def hash_password(password: str) -> str:
     return PASSWORD_HASH.hash(password)
 
@@ -207,6 +232,63 @@ def validate_account_directory(db: Session) -> None:
         raise RuntimeError("人员账号初始化未通过：\n" + "\n".join(
             f"- {problem}" for problem in problems
         ))
+
+
+def reconcile_administrators(db: Session) -> dict:
+    """Promote configured names and report whether anyone can still manage.
+
+    Losing every administrator used to fail silently: the login still worked,
+    but the management entry and every ``/api/admin`` route disappeared, and the
+    only screen that could grant the right back was itself admin-only.  Names
+    from ``JX_ADMIN_NAMES`` are promoted on every start, and when that leaves
+    nobody in charge the configured recovery name takes over so the system stays
+    manageable from a browser instead of needing console access.
+    """
+    promoted: list[str] = []
+    recovered: list[str] = []
+    active_staff = db.query(Staff).filter(Staff.is_active == 1).all()
+    for staff in active_staff:
+        if config.is_admin_name(staff.name) and not staff.is_admin:
+            staff.is_admin = 1
+            promoted.append(staff.name)
+    administrators = [
+        staff for staff in active_staff if is_administrator(staff)
+    ]
+    if not administrators and config.DEFAULT_ADMIN_NAMES:
+        for staff in active_staff:
+            if staff.name in config.DEFAULT_ADMIN_NAMES and not staff.is_admin:
+                staff.is_admin = 1
+                recovered.append(staff.name)
+        administrators = [
+            staff for staff in active_staff if is_administrator(staff)
+        ]
+    if promoted or recovered:
+        db.commit()
+    names = sorted(staff.name for staff in administrators)
+    if recovered:
+        logging.getLogger(__name__).warning(
+            "未配置任何管理员，已按兜底规则把 %s 设为管理员，否则管理页与备份恢复"
+            "将无法打开。请登录系统管理页确认权限归属，并在服务器 .env 中填写 "
+            "JX_ADMIN_NAMES 固定管理员名单。", "、".join(recovered),
+        )
+    if not names:
+        logging.getLogger(__name__).critical(
+            "当前没有任何管理员账号，管理页、备份与恢复入口均不可用。"
+            "请在服务器执行：python backend/scripts/manage_admin.py --grant 姓名，"
+            "或在服务器 .env 中填写 JX_ADMIN_NAMES 后重启服务。"
+        )
+    return {
+        "promoted": promoted,
+        "recovered": recovered,
+        "administrators": names,
+    }
+
+
+ADMIN_RECOVERY_HINT = (
+    "当前没有任何管理员账号。请在服务器上执行 "
+    "python backend/scripts/manage_admin.py --grant 姓名，"
+    "或在服务器 .env 填写 JX_ADMIN_NAMES 后重启服务。"
+)
 
 
 def _b64_encode(value: bytes) -> str:
@@ -358,7 +440,7 @@ def _current_account_identity(
         or int(staff.session_version or 0) != identity.session_version
     ):
         return None
-    role = "admin" if staff.name in config.ADMIN_NAMES else "operator"
+    role = account_role(staff)
     return Identity(
         name=staff.name,
         role=role,
@@ -444,7 +526,7 @@ def authenticate_staff(
             access_code.encode("utf-8"), config.ACCESS_CODE.encode("utf-8")
         ):
             raise HTTPException(401, "访问口令不正确。")
-    role = "admin" if clean_name in config.ADMIN_NAMES else "operator"
+    role = account_role(staff)
     return Identity(
         name=clean_name,
         role=role,
@@ -484,7 +566,7 @@ def change_staff_password(
     staff.password_updated_at = now_iso()
     staff.session_version = max(1, int(staff.session_version or 0)) + 1
     db.commit()
-    role = "admin" if staff.name in config.ADMIN_NAMES else "operator"
+    role = account_role(staff)
     return Identity(
         name=staff.name,
         role=role,

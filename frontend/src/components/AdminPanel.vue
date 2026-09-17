@@ -26,6 +26,30 @@
       class="admin-alert"
     />
     <el-alert
+      v-if="diagnostics && diagnostics.admin_configured === false"
+      title="当前没有任何管理员账号"
+      type="error"
+      :closable="false"
+      show-icon
+      class="admin-alert"
+    >
+      <template #default>
+        <div class="restore-alert-copy">
+          <span>人员账号将全部变成操作员，备份与恢复入口也会消失。请在服务器执行
+            python backend/scripts/manage_admin.py --grant 姓名，或在 .env 填写 JX_ADMIN_NAMES 后重启。</span>
+        </div>
+      </template>
+    </el-alert>
+    <el-alert
+      v-for="(warning, index) in dataRootWarnings"
+      :key="`data-root-${index}`"
+      :title="warning"
+      type="warning"
+      :closable="false"
+      show-icon
+      class="admin-alert"
+    />
+    <el-alert
       v-if="restoreState?.pending"
       title="已安排数据恢复，等待服务器重启"
       type="warning"
@@ -76,6 +100,12 @@
         <p>{{ diagnostics.oss.message }}</p>
         <small>最近成功：{{ diagnostics.oss.last_success_at ? cnDateTime(diagnostics.oss.last_success_at) : '尚无记录' }}</small>
       </section>
+      <section class="admin-card">
+        <h4>管理员与数据目录</h4>
+        <strong class="overview-value">{{ adminSummary }}</strong>
+        <p :title="diagnostics.data_root">数据：{{ diagnostics.data_root }}</p>
+        <small>{{ dataRootFootnote }}</small>
+      </section>
     </div>
 
     <div class="admin-grid">
@@ -87,12 +117,34 @@
         <template v-if="diagnostics">
           <dl class="status-list">
             <div><dt>数据库</dt><dd :class="diagnostics.database_check === 'ok' ? 'good' : 'bad'">{{ diagnostics.database_check === 'ok' ? '完整性正常' : diagnostics.database_check }}</dd></div>
+            <div><dt>数据库大小</dt><dd>{{ diagnostics.database_size ? formatBytes(diagnostics.database_size) : '尚未建立' }}</dd></div>
             <div><dt>本机剩余空间</dt><dd :class="diagnostics.disk_free_percent < 10 ? 'bad' : 'good'">{{ formatBytes(diagnostics.disk_free) }}（{{ diagnostics.disk_free_percent }}%）</dd></div>
+            <div><dt>管理员</dt><dd :class="diagnostics.admin_configured === false ? 'bad' : 'good'">{{ adminSummary }}</dd></div>
             <div><dt>近 10 分钟使用端</dt><dd>{{ diagnostics.recent_users }} 个</dd></div>
             <div><dt>服务器进程身份</dt><dd :title="diagnostics.service_identity">{{ diagnostics.service_identity }}</dd></div>
             <div><dt>访问地址</dt><dd :title="diagnostics.public_url">{{ diagnostics.public_url || '未设置固定地址' }}</dd></div>
           </dl>
-          <div class="path-note" :title="diagnostics.data_root">正式数据：{{ diagnostics.data_root }}</div>
+          <div class="data-root-box">
+            <div class="data-root-title">
+              <span>账号信息与交接班记录的存放位置</span>
+              <el-tag size="small" :type="diagnostics.data_root_report?.data_root_explicit ? 'success' : 'info'" effect="plain">
+                {{ diagnostics.data_root_report?.data_root_explicit ? '已显式固定' : '程序默认目录' }}
+              </el-tag>
+            </div>
+            <div class="path-note" :title="diagnostics.database_path">数据库：{{ diagnostics.database_path }}</div>
+            <div class="path-note" :title="diagnostics.data_root">数据根：{{ diagnostics.data_root }}</div>
+            <div v-if="diagnostics.data_root_report?.adopted_from" class="path-note">
+              已从旧目录接管：{{ diagnostics.data_root_report.adopted_from }}
+            </div>
+            <div v-for="legacy in diagnostics.data_root_report?.legacy_roots_with_data || []" :key="legacy"
+                 class="path-note legacy" :title="legacy">
+              旧目录仍有数据（未使用）：{{ legacy }}
+            </div>
+            <div class="data-root-hint">
+              更换服务器或运行方式前，先在此确认目录；也可在服务器执行
+              python backend/scripts/data_location.py 查看和接管。
+            </div>
+          </div>
         </template>
         <el-skeleton v-else :rows="5" animated />
       </section>
@@ -104,12 +156,26 @@
         </div>
         <template v-if="aiStatus">
           <dl class="status-list">
-            <div><dt>运行模式</dt><dd>{{ aiStatus.mode === 'qwen' ? 'Qwen' : '本地规则' }}</dd></div>
+            <div><dt>运行模式</dt><dd>{{ aiStatus.mode === 'qwen' ? 'Qwen 智能整理' : '本地确定性规则' }}</dd></div>
+            <div v-if="aiStatus.mode_requested && aiStatus.mode_requested !== aiStatus.mode">
+              <dt>配置要求</dt><dd>AI_MODE={{ aiStatus.mode_requested }}（未生效）</dd>
+            </div>
             <div><dt>模型</dt><dd>{{ aiStatus.model || '—' }}</dd></div>
-            <div><dt>API Key</dt><dd>{{ aiStatus.configured ? `已配置 ${aiStatus.key_hint || ''}` : '未配置' }}</dd></div>
+            <div><dt>API Key</dt><dd>{{ aiStatus.key_hint ? `已填写 ${aiStatus.key_hint}` : '未填写' }}</dd></div>
           </dl>
-          <div class="status-line" :class="aiStatus.configured ? 'ready' : 'warning'">
-            <span></span>{{ aiStatus.configured ? '配置已就绪' : '尚未填写 Key，仍可使用本地规则' }}
+          <div class="status-line" :class="aiStatus.mode === 'qwen' ? 'ready' : 'warning'">
+            <span></span>{{ aiStatus.mode === 'qwen'
+              ? '导入工作日志时会调用 AI 智能整理，失败自动回退到本地规则。'
+              : (aiStatus.unavailable_reason || '未启用云端 AI，导入仍可使用本地规则。') }}
+          </div>
+          <div v-if="aiStatus.mode !== 'qwen'" class="ai-guide">
+            <strong>开启 AI 智能整理</strong>
+            <ol>
+              <li>在阿里云百炼控制台创建 API Key，并开通 {{ aiStatus.model || 'qwen3.8-flash' }}。</li>
+              <li>Windows 服务端：打开服务端控制器 → 填写 API Key → 保存并重启服务器。</li>
+              <li>云端/源码部署：在服务器 .env 设 AI_MODE=auto、填写 QWEN_API_KEY，然后重启服务并重新构建前端。</li>
+              <li>重启后回到本页点“测试 AI 连接”，确认识别为 Qwen。</li>
+            </ol>
           </div>
         </template>
         <el-skeleton v-else :rows="3" animated />
@@ -181,22 +247,25 @@
       <div class="audit-heading">
         <div>
           <h4>人员账号与登录状态</h4>
-          <p>账号就是人员姓名。可在此添加人员、改名或停用/启用；初始密码只能首次登录使用，重置密码会立即让该人员所有旧登录失效。</p>
+          <p>账号就是人员姓名。可在此添加人员、改名、设为/取消管理员或停用启用；初始密码只能首次登录使用，重置密码会立即让该人员所有旧登录失效。</p>
         </div>
         <el-tag effect="plain">{{ accountRows.length }} 个账号</el-tag>
       </div>
       <div class="account-toolbar">
         <el-input v-model="newStaffName" size="small" placeholder="新人员姓名（即登录账号）" style="width: 220px" />
         <el-button size="small" type="primary" :loading="addingStaff" @click="addStaff">添加人员</el-button>
-        <span class="toolbar-hint">停用后该人员无法登录，可随时再启用；改名会立即让其旧登录失效。</span>
+        <span class="toolbar-hint">只有管理员能看到本页；停用后该人员无法登录，可随时再启用；改名或取消管理员会立即让其旧登录失效。</span>
       </div>
       <el-table v-if="accountRows.length" :data="accountRows" max-height="360" size="small" row-key="staff_id">
         <el-table-column prop="name" label="姓名/账号" min-width="120" />
-        <el-table-column label="权限" width="92" align="center">
+        <el-table-column label="权限" width="126" align="center">
           <template #default="{ row }">
             <el-tag :type="row.account_role === 'admin' ? 'warning' : 'info'" size="small">
               {{ row.account_role === 'admin' ? '管理员' : '操作员' }}
             </el-tag>
+            <div v-if="row.admin_from_env" class="role-hint" title="该姓名写在服务器环境变量 JX_ADMIN_NAMES 中，每次启动都会被提升为管理员">
+              由服务器配置指定
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="密码状态" min-width="130" align="center">
@@ -207,8 +276,13 @@
         <el-table-column label="最后登录" min-width="165">
           <template #default="{ row }">{{ row.last_login_at ? cnDateTime(row.last_login_at) : '尚未登录' }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="232" fixed="right" align="center">
+        <el-table-column label="操作" width="300" fixed="right" align="center">
           <template #default="{ row }">
+            <el-button link :type="row.account_role === 'admin' ? 'danger' : 'primary'"
+                       :disabled="!row.is_active || row.staff_id === currentStaffId || !!row.admin_from_env"
+                       :loading="busyAdminId === row.staff_id" @click="toggleAdmin(row)">
+              {{ row.account_role === 'admin' ? '取消管理员' : '设为管理员' }}
+            </el-button>
             <el-button link type="primary" :disabled="row.staff_id === currentStaffId" @click="renameStaff(row)">
               改名
             </el-button>
@@ -320,6 +394,7 @@ const backingUp = ref(false)
 const cancellingRestore = ref(false)
 const busyBackupId = ref('')
 const busyAccountId = ref<number | null>(null)
+const busyAdminId = ref<number | null>(null)
 const newStaffName = ref('')
 const addingStaff = ref(false)
 const loadError = ref('')
@@ -346,6 +421,19 @@ const restartInstruction = computed(() => restoreState.value?.pending?.instructi
   || (isCloud.value
     ? '请联系管理员重启云端应用；系统会先备份当前数据，再执行恢复。'
     : '请到服务器控制器点击“重启服务器”；系统会先备份当前数据，再执行恢复。'))
+const adminSummary = computed(() => {
+  const names = diagnostics.value?.administrators || []
+  if (!names.length) return '无（需要恢复）'
+  return names.length <= 3 ? names.join('、') : `${names.length} 人（${names.slice(0, 3).join('、')} 等）`
+})
+const dataRootWarnings = computed(() => diagnostics.value?.data_root_report?.warnings || [])
+const dataRootFootnote = computed(() => {
+  const report = diagnostics.value?.data_root_report
+  if (!report) return '数据目录状态未返回'
+  return report.has_database
+    ? `数据库 ${formatBytes(report.database_size)} · ${report.data_root_explicit ? '已显式固定目录' : '使用程序默认目录'}`
+    : '该目录下还没有数据库'
+})
 
 async function loadAdminData() {
   loading.value = true
@@ -560,6 +648,37 @@ async function addStaff() {
   }
 }
 
+async function toggleAdmin(row: AccountView) {
+  const granting = row.account_role !== 'admin'
+  try {
+    await ElMessageBox.confirm(
+      granting
+        ? `确认把“${row.name}”设为管理员？其将能看到本管理页，并可创建备份、安排恢复、重置他人密码。`
+        : `确认取消“${row.name}”的管理员权限？其已登录设备会立即退出，需要重新登录。`,
+      granting ? '设为管理员' : '取消管理员',
+      { type: 'warning', confirmButtonText: granting ? '确认设为管理员' : '确认取消', cancelButtonText: '取消' }
+    )
+  } catch (action) {
+    if (action === 'cancel' || action === 'close') return
+    throw action
+  }
+  busyAdminId.value = row.staff_id
+  try {
+    await api.adminPatchAccount(row.staff_id, { is_admin: granting })
+    accountRows.value = await api.adminAccounts()
+    diagnostics.value = await api.adminDiagnostics()
+    await loadAuditOnly()
+    ElMessage.success(granting
+      ? `${row.name} 已获得管理员权限，其需重新登录后才能看到系统管理。`
+      : `${row.name} 的管理员权限已取消。`)
+  } catch (error: any) {
+    const detail = error?.response?.data?.detail
+    ElMessage.error(typeof detail === 'string' ? detail : detail?.message || '管理员权限调整失败')
+  } finally {
+    busyAdminId.value = null
+  }
+}
+
 async function renameStaff(row: AccountView) {
   let name = ''
   try {
@@ -680,11 +799,12 @@ function auditAction(method: string, path: string) {
 </script>
 
 <style scoped>
-.overview-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin: 18px 0; }
+.overview-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin: 18px 0; }
 .overview-grid h4 { margin: 0 0 12px; }
 .overview-grid p { color: #526579; line-height: 1.7; }
 .overview-grid small { color: #6b7c8f; }
 .overview-value { display: block; font-size: 20px; color: #173856; overflow-wrap: anywhere; }
+@media (max-width: 1080px) { .overview-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 760px) { .overview-grid { grid-template-columns: 1fr; } }
 .admin-intro, .audit-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
 .admin-intro { margin-bottom: 16px; }
@@ -713,6 +833,14 @@ function auditAction(method: string, path: string) {
 .status-line.ready span { background: #31ae78; box-shadow: 0 0 0 4px #dff5ec; }
 .status-line.warning span { background: #dfa139; box-shadow: 0 0 0 4px #fff0d2; }
 .path-note { padding: 8px 10px; overflow: hidden; color: #6b7f92; border-radius: 8px; background: #f0f5f9; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.data-root-box { display: grid; gap: 6px; margin-top: 10px; }
+.data-root-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #46596d; font-size: 12px; font-weight: 700; }
+.data-root-hint { color: #7b8ca0; font-size: 11px; line-height: 1.6; }
+.path-note.legacy { color: #a8680b; background: #fdf4e6; }
+.role-hint { margin-top: 3px; color: #8b98a8; font-size: 10px; }
+.ai-guide { margin: 12px 0; padding: 11px 12px; border-radius: 9px; background: #eef5fb; }
+.ai-guide strong { display: block; margin-bottom: 6px; color: #24527f; font-size: 12px; }
+.ai-guide ol { margin: 0; padding-left: 18px; color: #55697e; font-size: 11px; line-height: 1.85; }
 .result-alert { margin-top: 12px; }
 .backup-note { min-height: 58px; margin-bottom: 13px; padding: 12px; color: #5e7186; border-radius: 9px; background: #eef5fb; font-size: 12px; line-height: 1.65; }
 .backup-result { margin-top: 12px; display: grid; gap: 4px; color: #5d7085; font-size: 11px; line-height: 1.5; }

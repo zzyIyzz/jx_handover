@@ -73,6 +73,7 @@ def _needs_account_migration(target_engine: Engine) -> bool:
         "session_version",
         "password_updated_at",
         "last_login_at",
+        "is_admin",
     }.issubset(columns)
 
 
@@ -243,6 +244,12 @@ def migrate_database(
                     "ALTER TABLE staff ADD COLUMN last_login_at TEXT"
                 ))
                 changed.append("staff.last_login_at")
+            if "is_admin" not in columns:
+                connection.execute(text(
+                    "ALTER TABLE staff "
+                    "ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0"
+                ))
+                changed.append("staff.is_admin")
 
     # SQLAlchemy creates only missing tables/indexes and leaves historical rows,
     # document snapshots and generated Word files untouched.

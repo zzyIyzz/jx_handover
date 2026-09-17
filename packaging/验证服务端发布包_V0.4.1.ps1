@@ -5,8 +5,19 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+
+# Expected values come from the same VERSION file the build used, so this check
+# can never pass a package whose version drifted from the source tree.
+$versionFile = Join-Path $repoRoot "VERSION"
+if (-not (Test-Path -LiteralPath $versionFile -PathType Leaf)) {
+    throw "缺少版本文件：$versionFile"
+}
+$appVersion = ((Get-Content -LiteralPath $versionFile -Raw) -split "`n")[0].Trim()
+$versionTag = "V$appVersion"
+$packageName = "江西片区智能交接班_局域网服务器_${versionTag}_win-x64"
+
 if (-not $ZipPath) {
-    $ZipPath = Join-Path $repoRoot "release\江西片区智能交接班_局域网服务器_V0.4.1_win-x64.zip"
+    $ZipPath = Join-Path $repoRoot "release\$packageName.zip"
 }
 if (-not (Test-Path -LiteralPath $ZipPath -PathType Leaf)) {
     throw "找不到服务端发布包：$ZipPath"
@@ -27,7 +38,7 @@ if ($actualPackageHash -ne $shaMatch.Value.ToUpperInvariant()) {
     throw "发布 ZIP 与同名 SHA256 文件不一致"
 }
 $releaseManifest = Get-Content -LiteralPath $releaseManifestPath -Raw | ConvertFrom-Json
-if ($releaseManifest.version -ne "0.4.1" -or $releaseManifest.package_sha256 -ne $actualPackageHash) {
+if ($releaseManifest.version -ne $appVersion -or $releaseManifest.package_sha256 -ne $actualPackageHash) {
     throw "机器可读发布清单的版本或 SHA256 不一致"
 }
 if (-not $WorkbookPath) {
@@ -38,9 +49,8 @@ if (-not (Test-Path -LiteralPath $WorkbookPath -PathType Leaf)) {
 }
 
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$smokeRoot = Join-Path $env:TEMP ("JXV041-Final-Packaged-独立冒烟-" + $stamp)
+$smokeRoot = Join-Path $env:TEMP ("JX-Final-Packaged-独立冒烟-" + $stamp)
 $extractRoot = Join-Path $smokeRoot "中文 路径 最终包"
-$packageName = "江西片区智能交接班_局域网服务器_V0.4.1_win-x64"
 $package = Join-Path $extractRoot $packageName
 $controlRoot = Join-Path $smokeRoot "服务器控制配置"
 $dataRoot = Join-Path $smokeRoot "正式数据 本地固定盘"
@@ -124,7 +134,7 @@ try {
         throw "发布目录缺少 release-info.json"
     }
     $releaseInfo = Get-Content -LiteralPath $releaseInfoPath -Raw | ConvertFrom-Json
-    if ($releaseInfo.version -ne "0.4.1" -or [int]$releaseInfo.port -ne 8765) {
+    if ($releaseInfo.version -ne $appVersion -or [int]$releaseInfo.port -ne 8765) {
         throw "发布目录内版本信息不正确"
     }
 
@@ -148,7 +158,7 @@ try {
     $serverExe = Join-Path $package "交接班服务器.exe"
     $serverProcess = Start-Process -FilePath $serverExe -WorkingDirectory $package -PassThru -WindowStyle Hidden
     $health = Wait-Health -ProcessId $serverProcess.Id
-    if ($health.version -ne "0.4.1" -or $health.mode -ne "server" -or [int]$health.port -ne 8765) {
+    if ($health.version -ne $appVersion -or $health.mode -ne "server" -or [int]$health.port -ne 8765) {
         throw ("健康信息不符合预期：" + ($health | ConvertTo-Json -Compress))
     }
     if ($health.public_url -ne "http://127.0.0.1:8765") {

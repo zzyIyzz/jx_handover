@@ -1,6 +1,8 @@
 # 江西片区智能交接班系统
 
-当前版本：**V0.5.2 登录与管理中心升级版（待 ECS 现场验收）**
+当前版本：**V0.5.3 管理入口、AI 状态与固定数据目录修复版（待 ECS 现场验收）**
+
+V0.5.3 修复三个现场问题：**管理员入口消失**（管理员标记改为持久化在数据库 `staff.is_admin`，管理页可直接设为/取消管理员，并新增本机命令行恢复入口与"无管理员"显式告警）、**导入工作日志时 AI 智能整理显示成红色错误**（`AI_MODE` 默认改为 `auto`，未配置 Key 时如实显示"未启用"而不是失败，功能从未被移除）、**换运行方式后账号与交接班记录像是被清空**（源码运行统一使用一个数据根，启动时以"只复制、不删除"的方式接管历史目录）。版本号统一到仓库根 `VERSION` 文件。升级步骤见 [V0.5.3 云端升级与验收](deploy/cloud/升级与验收_V0.5.3.md) 与 [V0.5.3 Windows 升级说明](packaging/升级说明_V0.5.3.md)。
 
 V0.5.2：个人账号只在当前页面保留登录凭据，关闭、刷新或恢复页面后重新登录；页面内切换功能保持登录。管理页统一显示后端实际版本、最近有效完整备份与 OSS 上传回执。升级不会重置个人密码。部署仍沿用开发分支 `codex/v0.5.1-account-login`，操作步骤见 [V0.5.2 升级与验收](deploy/cloud/升级与验收_V0.5.2.md)。
 
@@ -121,6 +123,7 @@ SYSTEM 通常没有远程 NAS 的个人凭据。若共享盘备份无权限，�
 - 模型固定为 `qwen3.8-flash`，使用严格 JSON Schema 和非思考模式返回结构化建议。
 - 日期和人员由确定性解析器保留，AI 返回不能改写这两类来源事实。
 - Qwen 超时、断网、Key 错误或输出异常时自动回退到本地规则，导入预览仍可继续。
+- `AI_MODE` 默认 `auto`：配置了 Key 就用真实模型，没配置就回落本地规则解析，不需要显式声明；`QWEN_BASE_URL` 与 `QWEN_MODEL` 留空即用官方默认值。未启用时导入预览显示中性提示"AI 智能整理未启用，已用本地规则解析"，**不是错误**，解析结果完整可用。管理页 AI 卡片显示实际生效模式、模型、Key 尾号，以及配置未生效时的原因与开启步骤。
 - AI 只能整理预览，不拥有确认、发布或生成正式 Word 的权限；用户的最终选择优先。
 
 Windows V0.4.1 中，Qwen Key 由服务器控制器使用 DPAPI 加密保存在 `%PROGRAMDATA%\JXHandoverServer\server-secrets.bin`；云端 V0.5.1 中，Key 只写入 ECS 上权限 `0600`、不进入镜像和 Git 的 `deploy/cloud/.env`。两种模式都不会把 Key 写入浏览器、健康接口、共享盘或业务备份。启用外部 AI 前仍应遵守单位的数据合规要求。
@@ -140,6 +143,14 @@ Windows V0.4.1 中，Qwen Key 由服务器控制器使用 DPAPI 加密保存在 
 └─ logs
 ```
 
+源码运行（`desktop` / `server` / `cloud` 三种模式）统一使用同一个数据根 `<仓库>\runtime`，不再随运行方式在 `runtime` 与 `runtime-server` 之间切换 —— 后者正是"换一种启动方式后账号和记录像是被清空"的原因。要显式固定位置设 `JX_HANDOVER_DATA_DIR`（仅接受本机固定磁盘），`JX_DATA_ROOT_AUTOFIND=0` 可关闭历史目录自动接管。启动时若发现当前数据根**没有数据库**、而历史候选目录**唯一**，会以"只复制、不移动、不删除"的方式接管，复制后用 `PRAGMA quick_check` 校验，失败则整体回滚；候选多于一个时不自动选择，只写告警。数据根、数据库大小、是否已显式固定、接管来源和残留历史目录在 `/api/health`（非云端模式）、管理员诊断接口、管理页"服务器健康"以及下面这个脚本中四处一致可见：
+
+```powershell
+.\.venv\Scripts\python.exe backend\scripts\data_location.py            # 查看当前数据根、数据库大小与历史目录
+.\.venv\Scripts\python.exe backend\scripts\data_location.py --adopt    # 显式接管唯一历史目录（--dry-run 可先预演）
+```
+
+- 管理员标记保存在数据库 `staff.is_admin`，数据库是权威来源；`JX_ADMIN_NAMES`（Windows 控制器的"管理员姓名"）仍在每次启动时提升名单中的人员，作为重装保底，因此改配置或换机器都不会再把人降权。管理页"人员账号"可直接设为/取消管理员，但不会取消最后一个管理员、不会改动 `JX_ADMIN_NAMES` 指定的人员、也不能修改自己的账号。完全没有管理员时不再静默：写严重告警日志，`/api/health` 返回 `admin_configured=false`，非管理员在姓名菜单看到禁用项"系统管理（需管理员权限）"及说明。本机恢复入口：源码部署用 `backend\scripts\manage_admin.py`，打包版用控制器"管理员姓名"。
 - SQLite 使用 WAL、外键约束、30 秒 busy timeout 和单 Uvicorn worker，适合当前检修中心的共享浏览器使用场景。
 - 所有业务 API 在服务端模式下都要求登录；云端按个人账号记录操作人，修改请求只写入最小操作审计，不记录请求正文、个人密码、初始密码或 Qwen Key。
 - 事项、基本信息、设备变更、外委考核和定期工作使用乐观锁，旧版本提交返回冲突，不覆盖新数据。
@@ -174,7 +185,7 @@ V0.3.0 桌面源码模式：
 .\start.ps1
 ```
 
-V0.4.1 服务端源码模式：
+V0.4.1 服务端源码模式（`JX_HANDOVER_SERVER_HOME` 是控制器引导目录，业务数据目录由 `JX_HANDOVER_DATA_DIR` 决定）：
 
 ```powershell
 $env:JX_HANDOVER_SERVER_HOME = 'D:\JXHandoverServerData'
@@ -188,7 +199,7 @@ $env:PYTHONPATH = 'backend'
 .\.venv\Scripts\python.exe -m unittest discover -s backend\tests -p 'test_*.py' -v
 ```
 
-前端生产构建与类型检查：
+前端生产构建与类型检查（`npm run build` 已包含类型检查，类型错误不会混进产物）：
 
 ```powershell
 Set-Location frontend
@@ -196,12 +207,23 @@ npm.cmd run build
 npx.cmd vue-tsc --noEmit
 ```
 
+数据目录与管理员运维脚本（无需先启动服务，打包版无 Python 环境时改用服务器控制器）：
+
+```powershell
+$env:PYTHONPATH = 'backend'
+.\.venv\Scripts\python.exe -m scripts.data_location              # 确认数据到底存在哪里
+.\.venv\Scripts\python.exe -m scripts.manage_admin --list        # 列出当前管理员（会先迁移旧结构）
+.\.venv\Scripts\python.exe -m scripts.manage_admin --grant '准确姓名'
+```
+
+两个脚本都遵守 `JX_HANDOVER_DATA_DIR`；数据库文件不存在时 `manage_admin.py` 直接报错退出且**不会新建空库**（就地新建空库会让启动接管逻辑误判"已有数据"）。
+
 构建 V0.4.1 Windows 服务端完整包：
 
 ```powershell
 .\packaging\build_server_v041.ps1
 ```
 
-脚本默认先构建前端、运行后端测试和 TypeScript 检查，再生成两个无控制台窗口的 EXE、完整 ZIP、SHA256 和机器可读发布清单。构建产物位于 `release`。真实工作日志、业务 DOCX、数据库、导入原件、Key、生成 Word 和服务器设置均不得提交到 Git。
+脚本默认先构建前端、运行后端测试和 TypeScript 检查，再生成两个无控制台窗口的 EXE、完整 ZIP、SHA256 和机器可读发布清单。构建产物位于 `release`。发布包目录名、`release-info.json` 和两个 EXE 的版本资源均由仓库根 `VERSION` 自动生成（`packaging\make_version_info.py`），不再逐处手改；升级流程是从解压后的**目录名**识别版本的，沿用旧名会让新包自报为旧版本并被当成降级。真实工作日志、业务 DOCX、数据库、导入原件、Key、生成 Word 和服务器设置均不得提交到 Git。
 
 版本变化见 [CHANGELOG.md](CHANGELOG.md)。

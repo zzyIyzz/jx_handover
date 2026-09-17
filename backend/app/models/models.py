@@ -345,6 +345,9 @@ class Staff(Base):
     role = Column(Text, nullable=False, default="现场值守")
     note = Column(Text, nullable=False, default="")
     is_active = Column(Integer, nullable=False, default=1)
+    # 管理员权限必须持久化在数据库里。只靠 JX_ADMIN_NAMES 环境变量判定时，
+    # 一次部署或配置丢失就会让所有人变成操作员，管理页与备份恢复入口整体消失。
+    is_admin = Column(Integer, nullable=False, default=0)
     # Cloud accounts use the staff name as the login name.  Only an Argon2id
     # hash is persisted; the bootstrap password is never stored in plaintext.
     password_hash = Column(Text, nullable=False, default="")

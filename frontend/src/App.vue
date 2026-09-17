@@ -108,12 +108,17 @@
             <template #dropdown>
               <el-dropdown-menu>
                 <el-dropdown-item v-if="session.role === 'admin'" command="admin">系统管理</el-dropdown-item>
-                <el-dropdown-item v-if="sessionOptions?.login_mode === 'account'" command="password" :divided="session.role === 'admin'">修改密码</el-dropdown-item>
+                <el-dropdown-item v-else disabled title="仅管理员可见。请联系管理员在“系统管理 → 人员账号”中把你设为管理员。">
+                  系统管理（需管理员权限）
+                </el-dropdown-item>
+                <el-dropdown-item v-if="sessionOptions?.login_mode === 'account'" command="password" divided>修改密码</el-dropdown-item>
                 <el-dropdown-item command="logout" :divided="sessionOptions?.login_mode !== 'account' && session.role === 'admin'">退出当前身份</el-dropdown-item>
               </el-dropdown-menu>
             </template>
           </el-dropdown>
-          <span class="version">V0.5.2 登录与管理中心</span>
+          <span class="version" :title="`后端实际运行版本 V${sessionOptions?.version || '未知'}`">
+            V{{ sessionOptions?.version || '…' }}
+          </span>
         </div>
       </div>
     </el-header>

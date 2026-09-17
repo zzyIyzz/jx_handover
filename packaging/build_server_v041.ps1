@@ -8,21 +8,38 @@ $ErrorActionPreference = "Stop"
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $python = Join-Path $projectRoot ".venv\Scripts\python.exe"
 $releaseDir = Join-Path $projectRoot "release"
-$packageName = "江西片区智能交接班_局域网服务器_V0.4.1_win-x64"
+
+# The repository VERSION file is the only version source.  server_update.py reads
+# the version back out of the extracted folder name, so a hard-coded number here
+# would make a newer build announce itself as an older one and look like a
+# downgrade to whoever is installing it.
+$versionFile = Join-Path $projectRoot "VERSION"
+if (-not (Test-Path -LiteralPath $versionFile -PathType Leaf)) {
+    throw "缺少版本文件：$versionFile"
+}
+$appVersion = ((Get-Content -LiteralPath $versionFile -Raw) -split "`n")[0].Trim()
+if ($appVersion -notmatch '^\d+\.\d+\.\d+$') {
+    throw "VERSION 文件内容不是 x.y.z 格式：$appVersion"
+}
+$versionTag = "V$appVersion"
+
+$packageName = "江西片区智能交接班_局域网服务器_${versionTag}_win-x64"
 $appDir = Join-Path $projectRoot "dist\$packageName"
 $zipPath = Join-Path $releaseDir "$packageName.zip"
 $shaPath = "$zipPath.sha256"
 $releaseManifestPath = "$zipPath.release.json"
 $standardTemplateSource = "resources\交接班系统标准导入模板_V0.3.0.xlsx"
-$standardTemplateReleaseName = "交接班系统标准导入模板_V0.4.1.xlsx"
+$standardTemplateReleaseName = "交接班系统标准导入模板_${versionTag}.xlsx"
 $filesToCopy = @(
     "packaging\服务器部署说明_V0.4.1.md",
     "packaging\现场部署测试清单_V0.4.1.md",
-    "packaging\升级说明_V0.4.1.md",
     "packaging\安装开机自动启动_系统账户.ps1",
     "packaging\安装登录自动启动_当前账户.ps1",
     "packaging\卸载开机自动启动.ps1"
 )
+# The upgrade note follows the version being built; the deployment guides above
+# are not version-specific and keep their original names.
+$upgradeNote = Join-Path $projectRoot "packaging\升级说明_${versionTag}.md"
 
 if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
     throw "未找到项目虚拟环境：$python"
@@ -66,11 +83,19 @@ try {
     & $python "packaging\make_icon.py"
     if ($LASTEXITCODE -ne 0) { throw "生成应用图标失败" }
 
+    & $python "packaging\make_version_info.py"
+    if ($LASTEXITCODE -ne 0) { throw "生成 EXE 版本资源失败" }
+
     & $python -m PyInstaller --noconfirm --clean "packaging\jx_handover_server_v041.spec"
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller 局域网服务器构建失败" }
 
     foreach ($relativePath in $filesToCopy) {
         Copy-Item -LiteralPath $relativePath -Destination $appDir -Force
+    }
+    if (Test-Path -LiteralPath $upgradeNote -PathType Leaf) {
+        Copy-Item -LiteralPath $upgradeNote -Destination $appDir -Force
+    } else {
+        Write-Warning "未找到 $versionTag 的升级说明，发布包内将不包含升级文档。"
     }
     Copy-Item -LiteralPath $standardTemplateSource `
         -Destination (Join-Path $appDir $standardTemplateReleaseName) -Force
@@ -78,7 +103,7 @@ try {
     $releaseInfo = [ordered]@{
         schema_version = 1
         app_id = "jx-handover-server"
-        version = "0.4.1"
+        version = $appVersion
         channel = "field-test"
         package_directory = $packageName
         port = 8765
@@ -101,7 +126,7 @@ try {
     $releaseManifest = [ordered]@{
         schema_version = 1
         app_id = "jx-handover-server"
-        version = "0.4.1"
+        version = $appVersion
         channel = "field-test"
         package_file = [IO.Path]::GetFileName($zipPath)
         package_size = (Get-Item -LiteralPath $zipPath).Length
@@ -116,11 +141,14 @@ try {
         Set-Content -LiteralPath $releaseManifestPath -Encoding utf8
     Copy-Item -LiteralPath "packaging\服务器部署说明_V0.4.1.md" -Destination $releaseDir -Force
     Copy-Item -LiteralPath "packaging\现场部署测试清单_V0.4.1.md" -Destination $releaseDir -Force
-    Copy-Item -LiteralPath "packaging\升级说明_V0.4.1.md" -Destination $releaseDir -Force
+    if (Test-Path -LiteralPath $upgradeNote -PathType Leaf) {
+        Copy-Item -LiteralPath $upgradeNote -Destination $releaseDir -Force
+    }
     Copy-Item -LiteralPath $standardTemplateSource `
         -Destination (Join-Path $releaseDir $standardTemplateReleaseName) -Force
 
     Write-Host "局域网服务器发布包：$zipPath" -ForegroundColor Green
+    Write-Host "版本：$appVersion"
     Write-Host "SHA256：$hash"
     Write-Host "发布清单：$releaseManifestPath"
     Write-Host "请在一台常开 Windows 主机上完整解压，先运行服务器控制器完成配置。"

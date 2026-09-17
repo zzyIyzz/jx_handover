@@ -1,11 +1,12 @@
 {
   "name": "jx-handover-frontend",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "type-check": "vue-tsc --noEmit",
+    "build": "npm run type-check && vite build",
     "preview": "vite preview"
   },
   "dependencies": {

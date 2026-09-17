@@ -150,12 +150,21 @@ print(json.dumps({
 
             settings = dict(server_config.DEFAULT_SETTINGS)
             settings["data_root"] = str(custom_root)
+            settings["admin_names"] = "甲管理员,乙管理员"
             secrets_value = dict(server_config.DEFAULT_SECRETS)
             with mock.patch.dict(os.environ, {}, clear=False):
                 server_config.apply_server_environment(settings, secrets_value)
                 self.assertEqual(
                     Path(os.environ["JX_HANDOVER_DATA_DIR"]), custom_root.resolve()
                 )
+                # The controller used to force AI_MODE=qwen.  With no API Key that
+                # made every import call the cloud model and fail, which reads as
+                # "AI is broken" rather than "AI is not configured".
+                self.assertEqual(os.environ["AI_MODE"], "auto")
+                # The controller and the backend it launches must agree on one
+                # version, or the tray and the management page contradict each other.
+                self.assertEqual(os.environ["JX_APP_VERSION"], server_config.APP_VERSION)
+                self.assertEqual(os.environ["JX_ADMIN_NAMES"], "甲管理员,乙管理员")
 
         with self.assertRaisesRegex(ValueError, "共享目录"):
             server_config.validate_local_data_root(

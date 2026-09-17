@@ -25,7 +25,7 @@ from urllib.parse import urlsplit
 from dotenv import load_dotenv
 
 
-APP_VERSION = os.getenv("JX_APP_VERSION", "0.5.2").strip() or "0.5.2"
+FALLBACK_APP_VERSION = "0.5.3"
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -59,6 +59,26 @@ RUNNING_FROZEN = bool(getattr(sys, "frozen", False))
 SOURCE_BASE = Path(__file__).resolve().parents[2]
 RESOURCE_BASE = Path(getattr(sys, "_MEIPASS", SOURCE_BASE)).resolve()
 load_dotenv(SOURCE_BASE / ".env")
+
+
+def _read_version_file() -> str:
+    """Read the single version source shared by the app and the controller.
+
+    ``server_config.py`` used to hard-code its own number, so a packaged server
+    could report V0.4.1 while the running code was already newer and the
+    management page showed two different versions.
+    """
+    for base in (RESOURCE_BASE, SOURCE_BASE):
+        try:
+            text = (base / "VERSION").read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if text:
+            return text.splitlines()[0].strip()
+    return FALLBACK_APP_VERSION
+
+
+APP_VERSION = os.getenv("JX_APP_VERSION", "").strip() or _read_version_file()
 
 configured_env_file = os.getenv("JX_HANDOVER_CONFIG_FILE", "").strip()
 if configured_env_file:
@@ -94,6 +114,7 @@ CLOUD_ACCESS_SCOPE = os.getenv("JX_CLOUD_ACCESS_SCOPE", "").strip().lower()
 COOKIE_SECURE = _env_bool("JX_COOKIE_SECURE", APP_MODE == "cloud")
 
 configured_data_root = os.getenv("JX_HANDOVER_DATA_DIR", "").strip()
+DATA_ROOT_EXPLICIT = bool(configured_data_root)
 if configured_data_root:
     USER_DATA_ROOT = Path(configured_data_root).expanduser().resolve()
 elif RUNNING_FROZEN:
@@ -108,9 +129,20 @@ elif RUNNING_FROZEN:
             local_app_data = str(Path.home() / "AppData" / "Local")
         USER_DATA_ROOT = Path(local_app_data) / "JXHandover"
 else:
-    USER_DATA_ROOT = SOURCE_BASE / (
-        "runtime-server" if APP_MODE in {"server", "cloud"} else "runtime"
-    )
+    # One directory for every source-run mode.  Older builds switched between
+    # ``runtime`` and ``runtime-server`` based on JX_HANDOVER_MODE, so starting
+    # the same checkout in another mode pointed at an empty folder and looked
+    # exactly like "all accounts and handover records were lost".
+    USER_DATA_ROOT = SOURCE_BASE / "runtime"
+
+# Historical roots that may still hold the only real database.  They are only
+# ever read and copied from; startup never deletes or moves anything.
+LEGACY_DATA_ROOT_CANDIDATES: tuple[Path, ...] = () if RUNNING_FROZEN else (
+    SOURCE_BASE / "runtime-server",
+    SOURCE_BASE / "backend" / "runtime",
+    SOURCE_BASE / "backend" / "runtime-server",
+)
+DATA_ROOT_AUTOFIND = _env_bool("JX_DATA_ROOT_AUTOFIND", True)
 
 DATA_DIR = USER_DATA_ROOT / "data"
 IMPORT_DIR = USER_DATA_ROOT / "imports"
@@ -154,16 +186,46 @@ BACKUP_KEEP_DAILY = _env_int("JX_BACKUP_KEEP_DAILY", 30, minimum=1)
 BACKUP_KEEP_MANUAL = _env_int("JX_BACKUP_KEEP_MANUAL", 30, minimum=1)
 
 # AI
-AI_MODE = os.getenv("AI_MODE", "mock").strip().lower()
-if AI_MODE not in {"mock", "qwen"}:
-    AI_MODE = "mock"
-QWEN_BASE_URL = os.getenv(
-    "QWEN_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
-).strip()
-QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen3.8-flash").strip()
+# ``auto`` is the default: use Qwen whenever a key is present and fall back to
+# the deterministic local rules otherwise.  Requiring operators to keep
+# AI_MODE=qwen in sync with the key is what silently switched a deployed server
+# back to local rules and made the work-log AI look like it had disappeared.
+DEFAULT_QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+AI_MODE_REQUESTED = os.getenv("AI_MODE", "auto").strip().lower()
+if AI_MODE_REQUESTED not in {"auto", "mock", "qwen"}:
+    AI_MODE_REQUESTED = "auto"
+QWEN_BASE_URL = (
+    os.getenv("QWEN_BASE_URL", "").strip() or DEFAULT_QWEN_BASE_URL
+)
+QWEN_MODEL = os.getenv("QWEN_MODEL", "").strip() or "qwen3.8-flash"
 QWEN_API_KEY = os.getenv("QWEN_API_KEY", "").strip()
 AI_STRUCTURED_MODE = os.getenv("AI_STRUCTURED_MODE", "json_schema").strip()
 AI_TIMEOUT_SECONDS = _env_float("AI_TIMEOUT_SECONDS", 60.0, minimum=5.0)
+
+
+def _resolve_ai_mode() -> str:
+    if AI_MODE_REQUESTED == "mock":
+        return "mock"
+    if AI_MODE_REQUESTED == "qwen":
+        return "qwen"
+    return "qwen" if QWEN_API_KEY else "mock"
+
+
+# Effective mode.  Callers keep reading ``config.AI_MODE``; the requested value
+# stays available so the management page can explain why AI is off.
+AI_MODE = _resolve_ai_mode()
+
+
+def ai_unavailable_reason() -> str:
+    """Explain in one sentence why work-log AI is not running."""
+    if AI_MODE == "qwen":
+        return ""
+    if AI_MODE_REQUESTED == "mock":
+        return "服务器配置 AI_MODE=mock，已显式关闭 AI 智能整理。"
+    if not QWEN_API_KEY:
+        return "服务器尚未填写 QWEN_API_KEY，AI 智能整理未启用。"
+    return "AI 配置不完整，当前使用本地确定性规则。"
+
 
 # Server and cloud modes use one password per staff name and force a password
 # change on first login.  Both are still deployed behind a private boundary
@@ -193,6 +255,23 @@ ADMIN_NAMES = {
     for value in os.getenv("JX_ADMIN_NAMES", "").split(",")
     if value.strip()
 }
+
+# Recovery default, used only when nothing else names an administrator.
+# Every /api/admin route is guarded, including the screen that grants the right,
+# so a roster with no administrator is a roster nobody can repair from the web
+# UI.  The regional lead is promoted once, loudly logged, and can then hand the
+# right to the proper people and remove this fallback.  Set
+# JX_DEFAULT_ADMIN_NAMES to an empty value to disable it.
+DEFAULT_ADMIN_NAMES = {
+    value.strip()
+    for value in os.getenv("JX_DEFAULT_ADMIN_NAMES", "刘学森").split(",")
+    if value.strip()
+}
+
+
+def is_admin_name(name: str) -> bool:
+    """True when the server configuration pins this name as an administrator."""
+    return str(name or "").strip() in ADMIN_NAMES
 
 
 def validate_runtime_configuration() -> None:
@@ -248,6 +327,8 @@ def validate_runtime_configuration() -> None:
         problems.append("JX_COOKIE_SECURE 必须为 1。")
     if SESSION_TTL_HOURS > 24:
         problems.append("云端 JX_SESSION_TTL_HOURS 不能超过 24 小时。")
+    # A public entry point must name its administrators explicitly; the
+    # recovery default is only a safety net for LAN and desktop installs.
     if not ADMIN_NAMES:
         problems.append("JX_ADMIN_NAMES 至少需要配置一名系统管理员。")
     elif any(marker in name for name in ADMIN_NAMES for marker in ("请替换", "请填写")):

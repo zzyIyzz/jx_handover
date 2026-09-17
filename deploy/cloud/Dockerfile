@@ -27,6 +27,7 @@ RUN python -m pip install --no-cache-dir --disable-pip-version-check \
 
 COPY backend/ ./backend/
 COPY resources/ ./resources/
+COPY VERSION ./VERSION
 COPY --from=frontend-build /build/frontend/dist ./frontend/dist
 COPY deploy/cloud/docker-entrypoint.sh /usr/local/bin/jx-cloud-entrypoint
 

@@ -6,7 +6,11 @@ import json
 from app.db import SessionLocal
 from app.migrations import initialize_database
 from app.models import Staff, Station, now_iso
-from app.security import initialize_missing_staff_passwords, validate_account_directory
+from app.security import (
+    initialize_missing_staff_passwords,
+    reconcile_administrators,
+    validate_account_directory,
+)
 
 
 SEED_STATIONS = [
@@ -74,6 +78,8 @@ def initialize_application_data() -> dict:
                 updated_staff += 1
         db.commit()
         validate_account_directory(db)
+        # Seed 只补齐名单，不会把已有人员的管理员权限清零。
+        administrators = reconcile_administrators(db)
         initialized_accounts = initialize_missing_staff_passwords(db)
     finally:
         db.close()
@@ -83,5 +89,7 @@ def initialize_application_data() -> dict:
         "created_staff": created_staff,
         "updated_staff": updated_staff,
         "initialized_accounts": initialized_accounts,
+        "administrators": administrators["administrators"],
+        "promoted_administrators": administrators["promoted"],
     }
 

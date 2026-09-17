@@ -4,7 +4,7 @@
       <header class="page-hero">
         <div>
           <el-button link class="back-button" @click="router.push('/')">← 返回工作台</el-button>
-          <span class="eyebrow">V0.5.1 · 多人集中协作</span>
+          <span class="eyebrow">多人集中协作</span>
           <h1>{{ currentStation.station_name }}交接班记录</h1>
           <p>{{ cnDate(batch.start_date) }} — {{ cnDate(batch.end_date) }} 班次 · 交接日 {{ cnDate(batch.handover_date) }}</p>
         </div>
@@ -279,6 +279,7 @@
             <span v-if="importPreview.ai.status === 'success'" class="ai-ok">AI：{{ importPreview.ai.model }} 已整理 {{ importPreview.ai.applied || 0 }} 条</span>
             <span v-else-if="importPreview.ai.status === 'fallback'" class="ai-fallback">AI 调用失败，已自动回退</span>
             <span v-else-if="importPreview.ai.status === 'not_configured'">AI 尚未配置，当前使用本地规则</span>
+            <span v-else-if="importPreview.ai.status === 'disabled'" class="ai-off">AI 智能整理未启用，已用本地规则解析</span>
             <span v-else-if="importPreview.ai.status === 'not_needed'">标准模板无需 AI，已按确定性规则解析</span>
             <span>共 {{ importPreview.summary.total }} 条</span><span>第三章 {{ importCount('important') }}</span><span>第四章 {{ importCount('handover') }}</span><span>第五章 {{ importCount('external') }}</span>
           </div>
@@ -619,13 +620,16 @@ function importCount(section: 'important' | 'handover' | 'external') { return (i
 function previewAiType(status: string): 'success' | 'warning' | 'info' | 'error' {
   if (status === 'success') return 'success'
   if (status === 'fallback' || status === 'not_configured') return 'warning'
-  if (status === 'not_needed') return 'info'
+  // "disabled" means the server was configured without cloud AI.  The parsing
+  // result is complete, so this must not look like a failure.
+  if (status === 'not_needed' || status === 'disabled') return 'info'
   return 'error'
 }
 function previewAiTitle(status: string) {
   if (status === 'success') return 'Qwen 智能整理成功，请继续人工确认'
   if (status === 'fallback') return 'Qwen 调用失败，已自动改用本地规则，仍可继续导入'
   if (status === 'not_configured') return '服务器尚未配置 Qwen API Key，当前使用本地规则'
+  if (status === 'disabled') return 'AI 智能整理未启用，已完整按本地规则解析'
   if (status === 'not_needed') return '标准模板已按固定字段解析，无需调用 AI'
   return 'AI 状态异常，预览数据仍保留；请人工检查后继续'
 }
@@ -633,6 +637,9 @@ function previewAiDescription(ai: ImportPreview['ai']) {
   if (ai.status === 'success') return `${ai.model || 'Qwen'} 只整理了当前班次预览中的候选事项，共应用 ${ai.applied || 0} 条建议；人工修改始终优先。`
   if (ai.status === 'fallback') return `本次未采用 AI 建议，确定性解析结果没有丢失。${ai.error ? `错误摘要：${ai.error}` : ''}`
   if (ai.status === 'not_configured') return '无需等待管理员配置，先检查本地规则生成的章节、状态、日期和责任人即可。'
+  if (ai.status === 'disabled') {
+    return `${ai.reason || '服务器未启用云端 AI。'}功能本身没有丢失：管理员登录后进入右上角姓名菜单 → 系统管理 → “Qwen 智能整理”，按其中步骤填写 API Key 并重启服务即可恢复。`
+  }
   if (ai.status === 'not_needed') return '文件字段与标准模板一致，系统没有向模型发送数据。'
   return '系统不会因为 AI 异常阻断导入；无效行仍会单独标出，其他有效行可以提交。'
 }
@@ -745,6 +752,7 @@ onBeforeUnmount(() => {
 .preview-summary span { padding: 6px 10px; color: #47627e; border-radius: 999px; background: #edf4fb; font-size: 12px; }
 .preview-summary .ai-ok { color: #17623a; background: #e7f7ee; }
 .preview-summary .ai-fallback { color: #9a5a0a; background: #fff4dc; }
+.preview-summary .ai-off { color: #5b6b7d; background: #eef1f5; }
 .preview-ai-alert { margin-bottom: 10px; }
 .preview-warning { margin-bottom: 8px; }
 .preview-table p { margin: 5px 0 0; color: #7a899a; font-size: 12px; }

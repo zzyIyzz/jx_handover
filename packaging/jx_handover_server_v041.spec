@@ -29,6 +29,9 @@ shared_data_files = [
         str(project_root / "resources" / "交接班系统标准导入模板_V0.3.0.xlsx"),
         "resources",
     ),
+    # The controller and the backend read the same file, so a packaged server
+    # can never report a stale hard-coded version next to the real one.
+    (str(project_root / "VERSION"), "."),
 ]
 
 server_analysis = Analysis(
@@ -70,7 +73,7 @@ controller_analysis = Analysis(
     [str(project_root / "server_controller.py")],
     pathex=[str(project_root)],
     binaries=[],
-    datas=[],
+    datas=[(str(project_root / "VERSION"), ".")],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

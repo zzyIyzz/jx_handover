@@ -30,6 +30,8 @@ data_files = [
         str(project_root / "resources" / "交接班系统标准导入模板_V0.3.0.xlsx"),
         "resources",
     ),
+    # Single version source, read by app.config at runtime.
+    (str(project_root / "VERSION"), "."),
 ] + collect_data_files("openpyxl")
 
 a = Analysis(

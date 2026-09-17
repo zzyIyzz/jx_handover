@@ -73,6 +73,9 @@ def session_options(db: Session = Depends(get_db)):
             .all()
         ]
     return {
+        # The header shows this instead of a version baked into the frontend
+        # bundle, so a stale cached page can never claim to be a newer release.
+        "version": config.APP_VERSION,
         "auth_required": config.AUTH_REQUIRED or config.ACCOUNT_LOGIN_ENABLED,
         "login_mode": "account" if config.ACCOUNT_LOGIN_ENABLED else "shared",
         "access_code_required": bool(

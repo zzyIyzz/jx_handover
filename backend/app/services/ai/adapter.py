@@ -360,8 +360,12 @@ def ai_configuration_status() -> dict[str, Any]:
     configured = bool(config.QWEN_API_KEY and config.QWEN_BASE_URL and config.QWEN_MODEL)
     return {
         "mode": config.AI_MODE,
+        # The management page shows both so an operator can see that AI_MODE=auto
+        # silently fell back to the deterministic rules because no key is set.
+        "mode_requested": config.AI_MODE_REQUESTED,
         "model": config.QWEN_MODEL if config.AI_MODE == "qwen" else "mock",
         "configured": configured if config.AI_MODE == "qwen" else True,
+        "unavailable_reason": config.ai_unavailable_reason(),
         "base_url": config.QWEN_BASE_URL if config.AI_MODE == "qwen" else "",
         "key_hint": (
             f"****{config.QWEN_API_KEY[-4:]}" if config.QWEN_API_KEY else ""
@@ -371,7 +375,14 @@ def ai_configuration_status() -> dict[str, Any]:
 
 def test_qwen_connection() -> dict:
     if config.AI_MODE != "qwen":
-        return {"ok": True, "mode": "mock", "message": "当前使用本地确定性模式。"}
+        return {
+            "ok": True,
+            "mode": "mock",
+            "message": (
+                "当前未启用云端 AI，导入使用本地确定性规则。"
+                + (config.ai_unavailable_reason() or "")
+            ),
+        }
     if not config.QWEN_API_KEY:
         return {"ok": False, "mode": "qwen", "message": "尚未填写 Qwen API Key。"}
     try:

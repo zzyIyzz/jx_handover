@@ -29,6 +29,11 @@ class CloudProcessProbe(unittest.TestCase):
                 env.pop(name, None)
         env.update({
             "PYTHONPATH": str(BACKEND_ROOT),
+            # Pinned on both ends: the child prints Chinese with ensure_ascii=False
+            # and the parent must not decode it through whatever the console
+            # locale happens to be, or the suite passes on one machine and fails
+            # on the next.
+            "PYTHONIOENCODING": "utf-8",
             "JX_HANDOVER_MODE": "cloud",
             "JX_HANDOVER_DATA_DIR": data_root,
             "JX_PUBLIC_URL": "https://handover.example.test:1215",
@@ -54,6 +59,7 @@ class CloudProcessProbe(unittest.TestCase):
             check=True,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=90,
         )
         return json.loads(completed.stdout.strip().splitlines()[-1])
@@ -131,14 +137,21 @@ with TestClient(app, base_url="https://handover.example.test:1215") as client:
         self.assertTrue(result["cookie_secure"])
         self.assertEqual(result["health_status"], 200)
         self.assertEqual(result["health"]["status"], "ok")
-        self.assertEqual(result["health"]["version"], "0.5.2")
+        # One version source: the health endpoint, the running configuration and
+        # the VERSION file must agree, so a stale hard-coded number cannot pass.
+        version_file = (PROJECT_ROOT / "VERSION").read_text(encoding="utf-8").strip()
+        self.assertEqual(result["health"]["version"], version_file)
+        self.assertEqual(config.APP_VERSION, version_file)
         self.assertEqual(result["health"]["mode"], "cloud")
         self.assertEqual(result["health"]["port"], 8765)
         self.assertEqual(result["health"]["public_port"], 1215)
         self.assertEqual(result["health"]["login_mode"], "account")
+        self.assertTrue(result["health"]["admin_configured"])
         self.assertNotIn("data_root", result["health"])
+        self.assertNotIn("data_root_report", result["health"])
         self.assertNotIn("public_url", result["health"])
         self.assertEqual(result["options"]["login_mode"], "account")
+        self.assertEqual(result["options"]["version"], version_file)
         self.assertEqual(result["options"]["staff_names"], [])
         self.assertIn("max-age=31536000", result["hsts"])
         self.assertIn("frame-ancestors 'none'", result["csp"])

@@ -1,4 +1,4 @@
-"""Machine-local settings for the V0.4.1 Windows LAN server package."""
+"""Machine-local settings for the Windows LAN server package."""
 from __future__ import annotations
 
 import base64
@@ -10,13 +10,39 @@ from pathlib import Path
 import re
 import socket
 import subprocess
+import sys
 from typing import Any
 import uuid
 
 
-APP_VERSION = "0.4.1"
+FALLBACK_APP_VERSION = "0.5.3"
 DEFAULT_QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DEFAULT_MODEL = "qwen3.8-flash"
+
+
+def _read_app_version() -> str:
+    """Read the shared VERSION file so controller and backend never disagree.
+
+    This module used to hard-code its own number.  A packaged server then
+    reported V0.4.1 while the backend it launched was already newer, and the
+    management page showed two different versions for one installation.
+    """
+    package_dir = Path(__file__).resolve().parent
+    bases = [
+        Path(getattr(sys, "_MEIPASS", package_dir)).resolve(),
+        package_dir,
+    ]
+    for base in bases:
+        try:
+            text = (base / "VERSION").read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if text:
+            return text.splitlines()[0].strip()
+    return FALLBACK_APP_VERSION
+
+
+APP_VERSION = _read_app_version()
 
 
 def server_root() -> Path:
@@ -338,8 +364,8 @@ def apply_server_environment(
     if settings is None or secrets_value is None:
         settings, secrets_value = load_server_settings()
     data_root = validate_local_data_root(configured_data_root(settings), create=True)
-    # Keep the historical V0.4.1 Windows package self-consistent when this
-    # branch also contains the separate V0.5.x cloud deployment profile.
+    # One version source for the controller and the backend it launches, so the
+    # tray window and the management page can never disagree.
     os.environ["JX_APP_VERSION"] = APP_VERSION
     os.environ["JX_HANDOVER_MODE"] = "server"
     os.environ["JX_HANDOVER_DATA_DIR"] = str(data_root)
@@ -348,7 +374,10 @@ def apply_server_environment(
     os.environ["JX_AUTH_REQUIRED"] = "1" if settings.get("auth_required", True) else "0"
     os.environ["JX_ADMIN_NAMES"] = str(settings.get("admin_names") or "").strip()
     os.environ["JX_ACCESS_CODE"] = str(secrets_value.get("access_code") or "")
-    os.environ["AI_MODE"] = "qwen"
+    # Let the key decide.  Forcing "qwen" made a controller with no API Key call
+    # the cloud model on every import and fail, which reads like the AI feature
+    # is broken rather than simply not configured.
+    os.environ["AI_MODE"] = "auto"
     os.environ["QWEN_MODEL"] = DEFAULT_MODEL
     os.environ["QWEN_BASE_URL"] = str(
         settings.get("qwen_base_url") or DEFAULT_QWEN_BASE_URL

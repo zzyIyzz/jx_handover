@@ -55,7 +55,7 @@ http.interceptors.response.use(
 
 export interface SessionOptions {
   auth_required: boolean; access_code_required: boolean; login_mode: 'account' | 'shared'
-  mode: 'desktop' | 'server' | 'cloud'; staff_names: string[]
+  mode: 'desktop' | 'server' | 'cloud'; staff_names: string[]; version?: string
 }
 export interface SessionState {
   session_token?: string
@@ -65,10 +65,12 @@ export interface SessionState {
 export interface AccountView {
   staff_id: number; name: string; station_code: string
   account_role: 'admin' | 'operator'; is_active: boolean; password_initialized: boolean
+  is_admin: boolean; admin_from_env: boolean
   must_change_password: boolean; password_updated_at: string | null; last_login_at: string | null
 }
 export interface AiAdminStatus {
-  mode: 'qwen' | 'mock' | string; model: string; configured: boolean; base_url: string; key_hint: string
+  mode: 'qwen' | 'mock' | string; mode_requested?: string; model: string
+  configured: boolean; unavailable_reason?: string; base_url: string; key_hint: string
 }
 export interface AiConnectionResult {
   ok: boolean; mode: string; model?: string; usage?: Record<string, number>; message: string
@@ -109,14 +111,24 @@ export interface NasTestView {
   configured: boolean; ok: boolean; identity: string; path: string
   latency_ms: number | null; message: string
 }
+export interface DataRootReport {
+  data_root: string; data_root_explicit: boolean; database_path: string
+  database_size: number; has_database: boolean; legacy_roots_with_data: string[]
+  autofind_enabled: boolean; adopted_from: string
+  adoption: { state: string; source: string; message: string; copied_files: number } | null
+  warnings: string[]
+}
 export interface DiagnosticsView {
   version: string; account_login_enabled: boolean
   oss: { state: string; message: string; updated_at: string | null; last_success_at: string | null
     synced_count: number; latest_backup_at: string | null; target: string; stale: boolean }
   checked_at: string; mode: 'desktop' | 'server' | 'cloud'; service_identity: string; public_url: string; data_root: string
+  data_root_report?: DataRootReport
   database_path: string; database_size: number; database_check: string
   disk_total: number; disk_used: number; disk_free: number; disk_free_percent: number
   recent_users: number; backup: BackupStatusView; restore: RestoreStateView
+  administrators?: string[]; admin_configured?: boolean; admin_env_names?: string[]
+  ai?: { mode: string; mode_requested: string; model: string; base_url: string; unavailable_reason: string }
   nas: { configured: boolean; path: string }
 }
 
@@ -181,7 +193,7 @@ export interface ImportPreviewRow {
 export interface ImportPreview {
   id: string; batch_id: string; station_meta_id: string; parser_key: string
   source_file_name: string; source_sha256: string; status: string; rows: ImportPreviewRow[]
-  ai: { status: string; model: string; applied?: number; usage?: Record<string, number>; error?: string }
+  ai: { status: string; model: string; applied?: number; usage?: Record<string, number>; error?: string; reason?: string }
   warnings: Array<{ sheet: string; field: string; reason: string }>
   summary: { total: number; important: number; handover: number; external: number; invalid: number; duplicate: number }
   result: Record<string, unknown>
@@ -200,7 +212,7 @@ export const api = {
   adminAccounts: () => http.get<AccountView[]>('/admin/accounts').then(r => r.data),
   adminResetPassword: (staffId: number) =>
     http.post<AccountView>(`/admin/accounts/${staffId}/reset-password`).then(r => r.data),
-  adminPatchAccount: (staffId: number, fields: { name?: string; is_active?: boolean }) =>
+  adminPatchAccount: (staffId: number, fields: { name?: string; is_active?: boolean; is_admin?: boolean }) =>
     http.patch<AccountView>(`/admin/accounts/${staffId}`, fields).then(r => r.data),
   staffAdd: (name: string) =>
     http.post<Staff>('/staff', { station_code: 'REGION', name, role: '', note: '' })

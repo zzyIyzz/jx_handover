@@ -2,7 +2,11 @@ name: jx-handover
 
 services:
   app:
-    image: jx-handover:0.5.2
+    # Not version-numbered: the tag used to be hand-edited per release and went
+    # stale, so a rebuilt image kept announcing an older version.  The running
+    # container reports its real version from the packaged VERSION file; set
+    # JX_IMAGE_TAG in the compose .env when a specific tag is wanted.
+    image: ${JX_IMAGE_TAG:-jx-handover:current}
     build:
       context: ../..
       dockerfile: deploy/cloud/Dockerfile

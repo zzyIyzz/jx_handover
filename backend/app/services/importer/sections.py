@@ -392,7 +392,16 @@ def _apply_ai_suggestions(
 ) -> dict:
     """Enrich only the editable preview fields and preserve provenance/dates."""
     if config.AI_MODE != "qwen":
-        return {"status": "disabled", "model": "mock", "usage": {}, "applied": 0}
+        # "disabled" is a normal, configured state - not a fault.  The reason is
+        # sent along so the preview can say where to turn AI back on instead of
+        # showing a generic error that reads like the feature was lost.
+        return {
+            "status": "disabled",
+            "model": "mock",
+            "usage": {},
+            "applied": 0,
+            "reason": config.ai_unavailable_reason(),
+        }
     if not config.QWEN_API_KEY:
         return {
             "status": "not_configured",
