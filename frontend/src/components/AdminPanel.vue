@@ -160,7 +160,9 @@
             <div v-if="aiStatus.mode_requested && aiStatus.mode_requested !== aiStatus.mode">
               <dt>配置要求</dt><dd>AI_MODE={{ aiStatus.mode_requested }}（未生效）</dd>
             </div>
-            <div><dt>模型</dt><dd>{{ aiStatus.model || '—' }}</dd></div>
+            <div><dt>模型</dt><dd>{{ aiStatus.mode === 'qwen'
+              ? (aiStatus.model || '—')
+              : `未启用（已配置 ${aiStatus.configured_model || 'Qwen 模型'}）` }}</dd></div>
             <div><dt>API Key</dt><dd>{{ aiStatus.key_hint ? `已填写 ${aiStatus.key_hint}` : '未填写' }}</dd></div>
           </dl>
           <div class="status-line" :class="aiStatus.mode === 'qwen' ? 'ready' : 'warning'">
@@ -171,7 +173,7 @@
           <div v-if="aiStatus.mode !== 'qwen'" class="ai-guide">
             <strong>开启 AI 智能整理</strong>
             <ol>
-              <li>在阿里云百炼控制台创建 API Key，并开通 {{ aiStatus.model || 'qwen3.8-flash' }}。</li>
+              <li>在阿里云百炼控制台创建 API Key，并开通 {{ aiStatus.configured_model || 'Qwen 模型' }}。</li>
               <li>Windows 服务端：打开服务端控制器 → 填写 API Key → 保存并重启服务器。</li>
               <li>云端/源码部署：在服务器 .env 设 AI_MODE=auto、填写 QWEN_API_KEY，然后重启服务并重新构建前端。</li>
               <li>重启后回到本页点“测试 AI 连接”，确认识别为 Qwen。</li>

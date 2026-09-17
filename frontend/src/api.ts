@@ -70,6 +70,7 @@ export interface AccountView {
 }
 export interface AiAdminStatus {
   mode: 'qwen' | 'mock' | string; mode_requested?: string; model: string
+  configured_model?: string
   configured: boolean; unavailable_reason?: string; base_url: string; key_hint: string
 }
 export interface AiConnectionResult {

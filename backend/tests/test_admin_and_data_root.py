@@ -485,6 +485,28 @@ class AiAvailabilityTest(unittest.TestCase):
         self.assertTrue(config.QWEN_BASE_URL.startswith("https://"))
         self.assertTrue(config.QWEN_MODEL)
 
+    def test_setup_guide_never_names_the_fallback_model(self):
+        # The guide is rendered only while AI is off, which is exactly when
+        # "model" reports the deterministic fallback.  Interpolating that value
+        # told operators to go and enable "mock" on the Aliyun console.
+        from app.services.ai.adapter import ai_configuration_status
+
+        with mock.patch.object(config, "AI_MODE", "mock"), \
+                mock.patch.object(config, "AI_MODE_REQUESTED", "auto"), \
+                mock.patch.object(config, "QWEN_API_KEY", ""), \
+                mock.patch.object(config, "QWEN_MODEL", "qwen3.8-flash"):
+            off = ai_configuration_status()
+        self.assertEqual(off["model"], "mock")
+        self.assertEqual(off["configured_model"], "qwen3.8-flash")
+        self.assertIn("QWEN_API_KEY", off["unavailable_reason"])
+
+        with mock.patch.object(config, "AI_MODE", "qwen"), \
+                mock.patch.object(config, "QWEN_API_KEY", "sk-test"), \
+                mock.patch.object(config, "QWEN_MODEL", "qwen3.8-flash"):
+            on = ai_configuration_status()
+        self.assertEqual(on["model"], "qwen3.8-flash")
+        self.assertEqual(on["configured_model"], on["model"])
+
 
 class OfflineAdministratorRecoveryTest(unittest.TestCase):
     """``manage_admin.py`` is the only way back in, so it must never make things worse.

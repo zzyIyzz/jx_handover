@@ -364,6 +364,11 @@ def ai_configuration_status() -> dict[str, Any]:
         # silently fell back to the deterministic rules because no key is set.
         "mode_requested": config.AI_MODE_REQUESTED,
         "model": config.QWEN_MODEL if config.AI_MODE == "qwen" else "mock",
+        # "model" answers what is running right now.  The setup guide has to name
+        # the model that will be used once a key exists, and the two differ
+        # exactly when AI is off - which is the only time the guide is shown.
+        # Without this field the guide told operators to go and enable "mock".
+        "configured_model": config.QWEN_MODEL,
         "configured": configured if config.AI_MODE == "qwen" else True,
         "unavailable_reason": config.ai_unavailable_reason(),
         "base_url": config.QWEN_BASE_URL if config.AI_MODE == "qwen" else "",
