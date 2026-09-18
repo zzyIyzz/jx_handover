@@ -256,22 +256,28 @@ ADMIN_NAMES = {
     if value.strip()
 }
 
-# Recovery default, used only when nothing else names an administrator.
-# Every /api/admin route is guarded, including the screen that grants the right,
-# so a roster with no administrator is a roster nobody can repair from the web
-# UI.  The regional lead is promoted once, loudly logged, and can then hand the
-# right to the proper people and remove this fallback.  Set
-# JX_DEFAULT_ADMIN_NAMES to an empty value to disable it.
+# Recovery roster, authoritative when JX_ADMIN_NAMES is empty.  Startup sync
+# promotes these names AND reclaims the right from stored administrators
+# outside the roster, so a deployment converges on exactly the configured
+# administrators without anyone editing the database by hand.  Every
+# /api/admin route is guarded, including the screen that grants the right, so
+# a roster with no administrator is a roster nobody can repair from the web
+# UI.  Set JX_DEFAULT_ADMIN_NAMES to an empty value to disable it.
 DEFAULT_ADMIN_NAMES = {
     value.strip()
-    for value in os.getenv("JX_DEFAULT_ADMIN_NAMES", "刘学森").split(",")
+    for value in os.getenv("JX_DEFAULT_ADMIN_NAMES", "周智源").split(",")
     if value.strip()
 }
 
 
 def is_admin_name(name: str) -> bool:
-    """True when the server configuration pins this name as an administrator."""
-    return str(name or "").strip() in ADMIN_NAMES
+    """True when the server configuration pins this name as an administrator.
+
+    The effective roster is ``JX_ADMIN_NAMES`` when set, otherwise the recovery
+    roster, so the UI guards below cover the pinned administrator even on a
+    server whose ``.env`` never named one.
+    """
+    return str(name or "").strip() in (ADMIN_NAMES or DEFAULT_ADMIN_NAMES)
 
 
 def validate_runtime_configuration() -> None:

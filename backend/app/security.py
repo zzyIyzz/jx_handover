@@ -235,41 +235,53 @@ def validate_account_directory(db: Session) -> None:
 
 
 def reconcile_administrators(db: Session) -> dict:
-    """Promote configured names and report whether anyone can still manage.
+    """Make the configured roster the exact set of administrators.
 
-    Losing every administrator used to fail silently: the login still worked,
-    but the management entry and every ``/api/admin`` route disappeared, and the
-    only screen that could grant the right back was itself admin-only.  Names
-    from ``JX_ADMIN_NAMES`` are promoted on every start, and when that leaves
-    nobody in charge the configured recovery name takes over so the system stays
-    manageable from a browser instead of needing console access.
+    The effective roster is ``JX_ADMIN_NAMES`` when set, otherwise the recovery
+    roster ``JX_DEFAULT_ADMIN_NAMES``.  Every startup promotes the roster names
+    and reclaims the right from stored administrators outside the roster (their
+    sessions are invalidated at the same time), so a deployment converges on
+    exactly the configured administrators without database surgery.  Reclaiming
+    is skipped when the roster matches no active staff: a name typo must degrade
+    loudly, never lock everybody out of the management page.
     """
     promoted: list[str] = []
     recovered: list[str] = []
+    demoted: list[str] = []
     active_staff = db.query(Staff).filter(Staff.is_active == 1).all()
+    using_default = not config.ADMIN_NAMES
+    roster = set(
+        config.DEFAULT_ADMIN_NAMES if using_default else config.ADMIN_NAMES
+    )
     for staff in active_staff:
-        if config.is_admin_name(staff.name) and not staff.is_admin:
+        if staff.name in roster and not staff.is_admin:
             staff.is_admin = 1
-            promoted.append(staff.name)
+            (recovered if using_default else promoted).append(staff.name)
+    if any(staff.name in roster for staff in active_staff):
+        for staff in active_staff:
+            if staff.name not in roster and staff.is_admin:
+                staff.is_admin = 0
+                # Sessions issued before the demotion keep the old admin claim
+                # until re-issued; the version bump invalidates them right now.
+                staff.session_version = max(1, int(staff.session_version or 0)) + 1
+                demoted.append(staff.name)
+    if promoted or recovered or demoted:
+        db.commit()
     administrators = [
         staff for staff in active_staff if is_administrator(staff)
     ]
-    if not administrators and config.DEFAULT_ADMIN_NAMES:
-        for staff in active_staff:
-            if staff.name in config.DEFAULT_ADMIN_NAMES and not staff.is_admin:
-                staff.is_admin = 1
-                recovered.append(staff.name)
-        administrators = [
-            staff for staff in active_staff if is_administrator(staff)
-        ]
-    if promoted or recovered:
-        db.commit()
     names = sorted(staff.name for staff in administrators)
+    if demoted:
+        logging.getLogger(__name__).warning(
+            "启动同步：管理员以配置名单为准（%s），已回收名单外人员 %s 的管理员权限，"
+            "其旧登录会话同时失效。",
+            "、".join(sorted(roster)), "、".join(demoted),
+        )
     if recovered:
         logging.getLogger(__name__).warning(
-            "未配置任何管理员，已按兜底规则把 %s 设为管理员，否则管理页与备份恢复"
-            "将无法打开。请登录系统管理页确认权限归属，并在服务器 .env 中填写 "
-            "JX_ADMIN_NAMES 固定管理员名单。", "、".join(recovered),
+            "未配置 JX_ADMIN_NAMES，已按兜底名单把 %s 设为管理员，否则管理页与备份恢复"
+            "将无法打开。请在服务器 .env 中填写 JX_ADMIN_NAMES 固定管理员名单。",
+            "、".join(recovered),
         )
     if not names:
         logging.getLogger(__name__).critical(
@@ -280,6 +292,7 @@ def reconcile_administrators(db: Session) -> dict:
     return {
         "promoted": promoted,
         "recovered": recovered,
+        "demoted": demoted,
         "administrators": names,
     }
 

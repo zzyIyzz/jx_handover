@@ -171,6 +171,53 @@ class AdministratorPersistenceTest(unittest.TestCase):
         finally:
             db.close()
 
+    def test_startup_sync_reclaims_the_right_from_names_outside_the_roster(self):
+        # The recovery roster is authoritative: 周智源 is promoted and 刘学森,
+        # who was an administrator before, loses the right and every session
+        # issued to him before this restart.
+        self._seed(["周智源", "刘学森"], admin_flags={"刘学森": 1})
+        db = self.Session()
+        try:
+            with mock.patch.object(config, "ADMIN_NAMES", set()), \
+                    mock.patch.object(config, "DEFAULT_ADMIN_NAMES", {"周智源"}):
+                result = reconcile_administrators(db)
+            self.assertEqual(result["recovered"], ["周智源"])
+            self.assertEqual(result["demoted"], ["刘学森"])
+            self.assertEqual(result["administrators"], ["周智源"])
+            demoted = db.query(Staff).filter(Staff.name == "刘学森").one()
+            self.assertEqual(demoted.is_admin, 0)
+            self.assertGreaterEqual(int(demoted.session_version or 0), 2)
+        finally:
+            db.close()
+
+    def test_env_roster_is_authoritative_over_ui_granted_administrators(self):
+        # When JX_ADMIN_NAMES is set it wins over anything granted through the
+        # management page, so the deployment still converges on the one name.
+        self._seed(["周智源", "甲管理员"], admin_flags={"甲管理员": 1})
+        db = self.Session()
+        try:
+            with mock.patch.object(config, "ADMIN_NAMES", {"周智源"}):
+                result = reconcile_administrators(db)
+            self.assertEqual(result["promoted"], ["周智源"])
+            self.assertEqual(result["demoted"], ["甲管理员"])
+            self.assertEqual(result["administrators"], ["周智源"])
+        finally:
+            db.close()
+
+    def test_roster_matching_nobody_never_demotes_the_last_administrator(self):
+        # A typo in the roster must degrade loudly instead of wiping out every
+        # administrator and locking everybody out of the management page.
+        self._seed(["甲管理员", "乙操作员"], admin_flags={"甲管理员": 1})
+        db = self.Session()
+        try:
+            with mock.patch.object(config, "ADMIN_NAMES", {"不存在的人"}), \
+                    mock.patch.object(config, "DEFAULT_ADMIN_NAMES", set()):
+                result = reconcile_administrators(db)
+            self.assertEqual(result["demoted"], [])
+            self.assertEqual(result["administrators"], ["甲管理员"])
+        finally:
+            db.close()
+
     def test_grant_and_revoke_through_the_management_api(self):
         ids = self._seed(["甲管理员", "乙操作员", "丙操作员"], admin_flags={"甲管理员": 1})
         with mock.patch.multiple(config, ADMIN_NAMES=set(), DEFAULT_ADMIN_NAMES=set(), **BASE_SETTINGS):
@@ -634,7 +681,12 @@ class OfflineAdministratorRecoveryTest(unittest.TestCase):
             self.assertEqual(unknown.returncode, 2)
             self.assertIn("没有找到启用人员", unknown.stderr)
 
-    def test_recovery_name_is_announced_when_nobody_is_in_charge(self):
+    def test_default_roster_name_manages_the_system_before_any_restart(self):
+        # The recovery roster is authoritative, so its name is an effective
+        # administrator immediately: listing shows the person as an
+        # environment-pinned admin even on a database whose is_admin flag is
+        # still 0 (the service has not restarted to persist it yet).  This is
+        # what guarantees the pinned name can always reach the management page.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._write_old_schema(root, ["片区负责人", "乙操作员"])
@@ -643,15 +695,19 @@ class OfflineAdministratorRecoveryTest(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             payload = json.loads(completed.stdout.strip().splitlines()[-1])
-            self.assertEqual(payload["administrators"], [])
+            self.assertEqual(
+                [row["name"] for row in payload["administrators"]], ["片区负责人"]
+            )
+            self.assertTrue(payload["administrators"][0]["from_env"])
+            self.assertFalse(payload["administrators"][0]["stored"])
             self.assertEqual(payload["recovery_admin_names"], ["片区负责人"])
 
-            # The console text has to say the same thing: an operator reading
-            # "(none)" alone would conclude the system is unrepairable.
+            # The console names who can manage the system, so an operator never
+            # reads "(none)" and concludes the deployment is unrepairable.
             spoken = self._run(root, "--list", JX_DEFAULT_ADMIN_NAMES="片区负责人")
             self.assertEqual(spoken.returncode, 0, spoken.stderr)
             self.assertIn("片区负责人", spoken.stdout)
-            self.assertIn("兜底", spoken.stdout)
+            self.assertIn("当前管理员", spoken.stdout)
 
 
 if __name__ == "__main__":

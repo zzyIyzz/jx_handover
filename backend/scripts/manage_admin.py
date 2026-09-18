@@ -219,8 +219,9 @@ def main() -> None:
             recovery = result.get("recovery_admin_names") or []
             if recovery:
                 print(
-                    "重启服务后会按兜底规则自动提升："
+                    "重启服务后会按配置名单自动提升："
                     + "、".join(recovery)
+                    + "，并回收名单外人员的管理员权限"
                     + "（可用 JX_DEFAULT_ADMIN_NAMES 调整或置空关闭）"
                 )
             else:

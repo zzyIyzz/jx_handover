@@ -78,7 +78,8 @@ def initialize_application_data() -> dict:
                 updated_staff += 1
         db.commit()
         validate_account_directory(db)
-        # Seed 只补齐名单，不会把已有人员的管理员权限清零。
+        # Seed 只补齐名单，不动管理员标记；管理员以配置名单为准，
+        # 启动同步提升名单内人员并回收名单外人员的管理员权限。
         administrators = reconcile_administrators(db)
         initialized_accounts = initialize_missing_staff_passwords(db)
     finally:
@@ -91,5 +92,6 @@ def initialize_application_data() -> dict:
         "initialized_accounts": initialized_accounts,
         "administrators": administrators["administrators"],
         "promoted_administrators": administrators["promoted"],
+        "demoted_administrators": administrators["demoted"],
     }
 

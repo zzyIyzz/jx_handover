@@ -92,7 +92,8 @@ def _account_row(staff: Staff) -> dict:
         "staff_role": staff.role,
         "account_role": account_role(staff),
         "is_admin": bool(is_administrator(staff)),
-        # A name pinned by JX_ADMIN_NAMES is promoted on every start, so the
+        # A name pinned by the configured roster (JX_ADMIN_NAMES, or the
+        # recovery roster when it is empty) is promoted on every start, so the
         # management page has to say why the toggle cannot simply be turned off.
         "admin_from_env": config.is_admin_name(staff.name),
         "is_active": bool(staff.is_active),
@@ -141,7 +142,7 @@ def patch_account(
             raise HTTPException(422, "人员姓名不能为空。")
         if clean_name != staff.name:
             if config.is_admin_name(staff.name):
-                raise HTTPException(409, "该姓名在 JX_ADMIN_NAMES 中配置为管理员，不允许改名。")
+                raise HTTPException(409, "该姓名在服务器配置的管理员名单（JX_ADMIN_NAMES，缺省 JX_DEFAULT_ADMIN_NAMES）中，不允许改名。")
             duplicate = (
                 db.query(Staff)
                 .filter(Staff.is_active == 1, Staff.name == clean_name)
@@ -159,7 +160,7 @@ def patch_account(
             if config.is_admin_name(staff.name):
                 raise HTTPException(
                     409,
-                    "该姓名在 JX_ADMIN_NAMES 中配置为管理员，需先从服务器环境变量中移除。",
+                    "该姓名在服务器配置的管理员名单（JX_ADMIN_NAMES，缺省 JX_DEFAULT_ADMIN_NAMES）中，需先从环境变量中移除。",
                 )
             if count_administrators(db) <= 1:
                 raise HTTPException(409, "必须保留至少一个管理员，否则管理页与备份恢复将无法使用。")
@@ -180,7 +181,7 @@ def patch_account(
             staff.session_version = max(1, int(staff.session_version or 0)) + 1
         else:
             if config.is_admin_name(staff.name):
-                raise HTTPException(409, "该姓名在 JX_ADMIN_NAMES 中配置为管理员，不允许停用。")
+                raise HTTPException(409, "该姓名在服务器配置的管理员名单（JX_ADMIN_NAMES，缺省 JX_DEFAULT_ADMIN_NAMES）中，不允许停用。")
             if is_administrator(staff) and count_administrators(db) <= 1:
                 raise HTTPException(409, "必须保留至少一个启用状态的管理员，不允许停用最后一个。")
             staff.is_active = 0
