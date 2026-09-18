@@ -200,6 +200,35 @@ export interface ImportPreview {
   result: Record<string, unknown>
 }
 
+export interface MeetingRow {
+  kind: string; kind_label: string; title: string; station: string
+  status: string; status_label: string; group: string
+  priority: string; priority_label: string; owner: string
+  progress: string; next_action: string
+}
+export interface MeetingGroup { key: string; label: string; count: number; rows: MeetingRow[] }
+export interface MeetingReport {
+  month: string; month_label: string; batch_count: number
+  summary: { completed: number; in_progress: number; pending: number; urgent: number }
+  groups: MeetingGroup[]
+}
+export interface YearlyPlanItem {
+  library_id: string; name: string; schedule: string; owner: string; reviewer: string
+  doc_list: string; plan_windows: [string, string][]
+  state: 'completed' | 'in_progress' | 'pending'; state_label: string
+  times_recorded: number
+  latest: { status_label: string; owner: string; note: string; updated_at: string } | null
+  memory: { status_label: string; owner: string; note: string; updated_at: string } | null
+}
+export interface YearlyPlanReport {
+  year: number
+  summary: { total: number; completed: number; in_progress: number; pending: number }
+  items: YearlyPlanItem[]
+}
+export interface PeriodicMemory {
+  status_label: string; owner: string; note: string; updated_at: string; plan_month: string
+}
+
 export const api = {
   sessionOptions: () => http.get<SessionOptions>('/session/options').then(r => r.data),
   sessionMe: () => http.get<SessionState>('/session/me').then(r => r.data),
@@ -315,7 +344,16 @@ export const api = {
     body.append('default_year', String(options.defaultYear))
     if (options.stationCode) body.append('station_code', options.stationCode)
     return http.post<ImportResult>('/imports/monthly-plan', body, { timeout: 120000 }).then(r => r.data)
-  }
+  },
+
+  monthlyMeeting: (month: string) =>
+    http.get<MeetingReport>('/reports/monthly-meeting', { params: { month } }).then(r => r.data),
+  yearlyPlan: (year: number) =>
+    http.get<YearlyPlanReport>('/reports/yearly-plan', { params: { year } }).then(r => r.data),
+  periodicMemory: (libraryIds: string[]) =>
+    http.post<{ memory: Record<string, PeriodicMemory> }>('/reports/periodic-memory', { library_ids: libraryIds }).then(r => r.data),
+  exportMonthlyMeeting: (month: string) =>
+    downloadFile(`/api/reports/monthly-meeting/export?month=${month}`, `月度例会工作材料_${month}.xlsx`)
 }
 
 export function cnDate(iso?: string | null): string {
