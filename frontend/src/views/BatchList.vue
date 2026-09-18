@@ -7,6 +7,7 @@
         <p>先导入班会记录，再创建交接班；系统会自动整理事项、保留来源并生成 Word。</p>
       </div>
       <div class="welcome-actions">
+        <el-button size="large" @click="router.push('/meeting-report')">例会材料</el-button>
         <el-button size="large" @click="openImport">导入数据</el-button>
         <el-button type="primary" size="large" @click="openCreate">＋ 新建交接班</el-button>
       </div>

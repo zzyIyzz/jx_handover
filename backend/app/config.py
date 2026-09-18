@@ -265,7 +265,7 @@ ADMIN_NAMES = {
 # UI.  Set JX_DEFAULT_ADMIN_NAMES to an empty value to disable it.
 DEFAULT_ADMIN_NAMES = {
     value.strip()
-    for value in os.getenv("JX_DEFAULT_ADMIN_NAMES", "周智源").split(",")
+    for value in os.getenv("JX_DEFAULT_ADMIN_NAMES", "周智源,刘学森").split(",")
     if value.strip()
 }
 

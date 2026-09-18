@@ -34,17 +34,44 @@
         </el-form-item>
         <el-form-item v-if="sessionOptions?.login_mode === 'account'" label="个人密码" required>
           <el-input v-model="loginForm.password" type="password" show-password autocomplete="current-password"
-                    placeholder="请输入个人密码" class="login-control" />
+                    placeholder="请输入个人密码" class="login-control"
+                    @keydown="trackCapsLock" @keyup="trackCapsLock" @blur="capsLockOn = false" />
+          <div v-if="capsLockOn" class="caps-warning" role="status">
+            大写锁定（Caps Lock）已开启，输入的英文将全为大写，密码区分大小写，请确认后再登录。
+          </div>
         </el-form-item>
         <el-form-item v-else-if="sessionOptions?.access_code_required" label="系统访问口令" required>
           <el-input v-model="loginForm.accessCode" type="password" show-password autocomplete="current-password"
-                    placeholder="请输入管理员提供的访问口令" class="login-control" />
+                    placeholder="请输入管理员提供的访问口令" class="login-control"
+                    @keydown="trackCapsLock" @keyup="trackCapsLock" @blur="capsLockOn = false" />
+          <div v-if="capsLockOn" class="caps-warning" role="status">
+            大写锁定（Caps Lock）已开启，输入的英文将全为大写，口令区分大小写，请确认后再提交。
+          </div>
         </el-form-item>
         <el-button type="primary" size="large" class="login-button" :loading="loginLoading" @click="login">
           {{ sessionOptions?.login_mode === 'account' ? '登录系统' : '进入系统' }}
         </el-button>
+        <el-button v-if="sessionOptions?.login_mode === 'account'" text type="primary"
+                   class="forgot-link" @click="forgotDialog = true">
+          忘记密码？
+        </el-button>
       </el-form>
-      <div class="login-note">关闭或刷新页面后需重新登录；页面内切换功能无需重复登录。忘记密码请联系管理员重置。</div>
+      <div class="login-note">关闭或刷新页面后需重新登录；页面内切换功能无需重复登录。忘记密码可点击上方“忘记密码？”查看处理流程。</div>
+
+      <el-dialog v-model="forgotDialog" title="忘记密码处理流程" width="min(520px, calc(100vw - 24px))" align-center>
+        <div class="forgot-body">
+          <p>为保障账号与交接数据安全，系统不提供自助找回密码。请按以下流程处理：</p>
+          <ol>
+            <li>请联系系统运维负责人 <strong>周智源</strong>，联系电话 <strong>18872863252</strong>，说明本人姓名及账号情况；</li>
+            <li>运维负责人核实身份后，将在“系统管理 → 人员账号与登录状态”中把您的密码重置为初始密码；</li>
+            <li>重置完成后，请使用初始密码登录，并按页面提示立即设置不少于 12 位的新个人密码。</li>
+          </ol>
+          <p class="forgot-tip">温馨提示：请勿向他人透露个人密码；密码仅由本人持有，运维人员无法查看您的原密码。</p>
+        </div>
+        <template #footer>
+          <el-button type="primary" @click="forgotDialog = false">我知道了</el-button>
+        </template>
+      </el-dialog>
     </section>
   </main>
 
@@ -59,15 +86,21 @@
       <el-form label-position="top" @submit.prevent="changePassword">
         <el-form-item label="当前密码" required>
           <el-input v-model="passwordForm.currentPassword" type="password" show-password
-                    autocomplete="current-password" placeholder="请再次输入当前密码" class="login-control" />
+                    autocomplete="current-password" placeholder="请再次输入当前密码" class="login-control"
+                    @keydown="trackCapsLock" @keyup="trackCapsLock" @blur="capsLockOn = false" />
         </el-form-item>
         <el-form-item label="新密码" required>
           <el-input v-model="passwordForm.newPassword" type="password" show-password
-                    autocomplete="new-password" placeholder="至少 12 个字符，不能继续使用初始密码" class="login-control" />
+                    autocomplete="new-password" placeholder="至少 12 个字符，不能继续使用初始密码" class="login-control"
+                    @keydown="trackCapsLock" @keyup="trackCapsLock" @blur="capsLockOn = false" />
         </el-form-item>
         <el-form-item label="确认新密码" required>
           <el-input v-model="passwordForm.confirmPassword" type="password" show-password
-                    autocomplete="new-password" placeholder="请再输入一次新密码" class="login-control" />
+                    autocomplete="new-password" placeholder="请再输入一次新密码" class="login-control"
+                    @keydown="trackCapsLock" @keyup="trackCapsLock" @blur="capsLockOn = false" />
+          <div v-if="capsLockOn" class="caps-warning" role="status">
+            大写锁定（Caps Lock）已开启，输入的英文将全为大写，密码区分大小写，请确认后再提交。
+          </div>
         </el-form-item>
         <el-button type="primary" size="large" class="login-button" :loading="passwordChanging" @click="changePassword">
           保存新密码并继续
@@ -151,6 +184,15 @@ const session = ref<SessionState | null>(null)
 const loginForm = reactive({ name: '', password: '', accessCode: '' })
 const passwordForm = reactive({ currentPassword: '', newPassword: '', confirmPassword: '' })
 const voluntaryPasswordChange = ref(false)
+const capsLockOn = ref(false)
+const forgotDialog = ref(false)
+
+// 密码区分大小写；值班电脑常开大写锁定，输入框聚焦时实时提示，避免反复登录失败。
+function trackCapsLock(event: KeyboardEvent) {
+  if (typeof event.getModifierState === 'function') {
+    capsLockOn.value = event.getModifierState('CapsLock')
+  }
+}
 const needsLogin = computed(() => Boolean(sessionOptions.value?.auth_required && !session.value?.authenticated))
 const forcedPasswordChange = computed(() => Boolean(session.value?.authenticated && session.value?.password_change_required))
 const needsPasswordChange = computed(() => Boolean(forcedPasswordChange.value || voluntaryPasswordChange.value))
@@ -421,6 +463,46 @@ select {
   background: #edf5fc;
   font-size: 12px;
   line-height: 1.6;
+}
+
+.caps-warning {
+  width: 100%;
+  margin-top: 6px;
+  padding: 6px 10px;
+  border: 1px solid #f0c36d;
+  border-radius: 8px;
+  color: #9a6a12;
+  background: #fdf6e5;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.forgot-link {
+  margin: 8px 0 0 !important;
+  padding: 0;
+  font-size: 13px;
+}
+
+.forgot-body p {
+  margin: 0 0 10px;
+  color: #44586c;
+  font-size: 14px;
+  line-height: 1.8;
+}
+
+.forgot-body ol {
+  margin: 0 0 12px;
+  padding-left: 22px;
+  color: #2c3e50;
+  font-size: 14px;
+  line-height: 1.9;
+}
+
+.forgot-tip {
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: #edf5fc;
+  font-size: 12px !important;
 }
 
 .app-header {
