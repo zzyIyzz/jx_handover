@@ -15,10 +15,9 @@ from datetime import date
 import math
 from pathlib import Path
 
-from openpyxl import load_workbook
-
 from app import config
 from app.models import ImportJob, SourceRecord, Station, new_id, now_iso
+from app.services.importer.workbook import load_workbook_compat
 
 _FULL_DATE = re.compile(r"(\d{4})\s*[./年\-]\s*(\d{1,2})\s*[./月\-]\s*(\d{1,2})")
 _MD_CN = re.compile(r"(\d{1,2})\s*月\s*(\d{1,2})\s*[日号]?")
@@ -162,7 +161,7 @@ def import_meeting_xlsx(db, file_path: Path, default_year: int | None = None,
 
     inserted, skipped, date_unresolved = 0, 0, []
     try:
-        book = load_workbook(file_path, data_only=True, read_only=True)
+        book = load_workbook_compat(file_path, data_only=True, read_only=True)
     except Exception as exc:  # noqa: BLE001
         job.status = "failed"
         job.error_message = str(exc)
@@ -257,7 +256,7 @@ def import_monthly_plan_xlsx(db, file_path: Path, plan_month: str,
 
     inserted, skipped, date_unresolved = 0, 0, []
     try:
-        book = load_workbook(file_path, data_only=True, read_only=True)
+        book = load_workbook_compat(file_path, data_only=True, read_only=True)
     except Exception as exc:  # noqa: BLE001
         job.status = "failed"
         job.error_message = str(exc)

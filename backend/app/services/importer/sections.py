@@ -12,8 +12,6 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException
-from openpyxl import load_workbook
-
 from app import config
 from app.models import (
     ExternalAssessment,
@@ -30,6 +28,7 @@ from app.models import (
     now_iso,
 )
 from app.services.ai.adapter import get_ai
+from app.services.importer.workbook import load_workbook_compat
 
 
 STANDARD_SHEETS = {
@@ -371,6 +370,118 @@ def _parse_work_log(book, batch: HandoverBatch, station: Station) -> tuple[list[
     return rows, global_warnings
 
 
+def _monthly_shift_sheets(book) -> list:
+    """Return sheets matching the two-row morning/evening meeting layout."""
+    matched = []
+    for sheet in book.worksheets:
+        first = _headers(sheet, 1)
+        second = _headers(sheet, 2)
+        if ({"日期", "场站", "早班会"}.issubset(first)
+                and {"工作内容", "工作完成情况"}.issubset(second)):
+            matched.append(sheet)
+    return matched
+
+
+def _parse_monthly_shift_log(
+    book, batch: HandoverBatch, station: Station
+) -> tuple[list[dict], list[dict]]:
+    """Parse the regional two-row morning/evening meeting workbook."""
+    latest: OrderedDict[str, dict] = OrderedDict()
+    first_seen: dict[str, str] = {}
+    warnings: list[dict] = []
+    sheets = _monthly_shift_sheets(book)
+
+    for sheet in sheets:
+        top_headers = _headers(sheet, 1)
+        headers = _headers(sheet, 2)
+        date_column = top_headers["日期"]
+        station_column = top_headers["场站"]
+        current_day: Any = None
+        current_station = ""
+        for row_no in range(3, sheet.max_row + 1):
+            raw_day = sheet.cell(row_no, date_column).value
+            raw_station = sheet.cell(row_no, station_column).value
+            if raw_day not in (None, ""):
+                current_day = raw_day
+            if raw_station not in (None, ""):
+                current_station = _clean(raw_station)
+
+            title = _clean(_value(sheet, row_no, headers, "工作内容"))
+            if not title or not _station_matches(station, current_station):
+                continue
+            plan_date, date_error = _iso_date(
+                current_day, default_year=int(batch.start_date[:4])
+            )
+            if date_error or not plan_date:
+                continue
+            if not (batch.start_date <= plan_date <= batch.end_date):
+                continue
+            if "定期工作" in title and any(
+                word in title for word in ("日", "周", "月", "季", "年")
+            ):
+                continue
+
+            progress = _clean(_value(sheet, row_no, headers, "工作完成情况"))
+            remark = _clean(_value(
+                sheet, row_no, headers, "备注（其他需要说明的事项）", "备注"
+            ))
+            risk = _clean(_value(sheet, row_no, headers, "安全风险辨识"))
+            special = _clean(_value(sheet, row_no, headers, "特殊事项安排"))
+            personnel = _clean(_value(
+                sheet, row_no, headers, "工作责任人", "值班负责人"
+            ))
+            status = _status(progress)
+            section = "important" if status == "completed" else "handover"
+            summary_parts = []
+            if risk:
+                summary_parts.append(f"安全风险辨识：{risk}")
+            if special:
+                summary_parts.append(f"特殊事项安排：{special}")
+            progress_parts = [value for value in (progress, remark) if value]
+
+            key = _normalize(title)
+            first_seen.setdefault(key, plan_date)
+            row = _base_row(sheet.title, row_no, "item", section)
+            row.update({
+                "title_snapshot": title,
+                "status": status,
+                "priority": _priority(title),
+                "completed_by": personnel if status == "completed" else "",
+                "previous_owner": personnel if status != "completed" else "",
+                "next_owner": "",
+                "start_date": first_seen[key],
+                "end_date": plan_date if status == "completed" else None,
+                "summary": "\n".join(summary_parts),
+                "latest_progress": "\n".join(progress_parts),
+                "blocker": "",
+                "next_action": "",
+            })
+            if status == "unknown":
+                row["warnings"].append("完成情况为空或无法识别，请人工或由AI确认")
+            if "," in personnel or "，" in personnel:
+                row["warnings"].append("存在多名人员，请确认第三章完成人或第四章责任人")
+            row["source"]["raw"] = {
+                header: sheet.cell(row_no, column).value
+                for header, column in headers.items()
+            }
+            latest[key] = row
+
+    rows = list(latest.values())
+    if not rows:
+        warnings.append({
+            "sheet": "月度早晚班会",
+            "field": "场站/日期",
+            "reason": f"未找到 {station.name} 在 {batch.start_date} 至 {batch.end_date} 的工作记录",
+        })
+    else:
+        warnings.append({
+            "sheet": "月度早晚班会",
+            "field": "去重规则",
+            "reason": "跨月份工作表按工作内容合并，保留班次内最后一条完成情况",
+        })
+    return rows, warnings
+
+
 def _detect_adapter(book) -> str:
     if set(STANDARD_SHEETS).issubset(set(book.sheetnames)):
         return "standard_template"
@@ -378,6 +489,8 @@ def _detect_adapter(book) -> str:
         headers = _headers(book["Sheet1"], 2)
         if {"工作内容", "是否完成", "工作进度"}.issubset(headers):
             return "work_log"
+    if _monthly_shift_sheets(book):
+        return "monthly_shift_log"
     raise HTTPException(422, {
         "code": "UNSUPPORTED_XLSX_LAYOUT",
         "message": "无法识别这份 XLSX。请使用标准导入模板或实际工作日志格式。",
@@ -539,33 +652,42 @@ def create_preview(db, batch_id: str, meta_id: str, source_path: Path) -> dict:
     if not archived.exists():
         shutil.copy2(source_path, archived)
 
-    book = load_workbook(archived, data_only=True, read_only=False)
-    parser_key = _detect_adapter(book)
-    if parser_key == "standard_template":
-        rows, warnings = _parse_standard(book, batch)
-        ai_result = {
-            "status": "not_needed",
-            "model": config.QWEN_MODEL,
-            "usage": {},
-            "applied": 0,
-        }
-    else:
-        rows, warnings = _parse_work_log(book, batch, station)
-        ai_result = _apply_ai_suggestions(
-            rows, batch=batch, station=station
-        )
-        if ai_result["status"] == "not_configured":
-            warnings.append({
-                "sheet": "Sheet1",
-                "field": "AI",
-                "reason": "Qwen尚未配置，已使用确定性规则生成预览。",
-            })
-        elif ai_result["status"] == "fallback":
-            warnings.append({
-                "sheet": "Sheet1",
-                "field": "AI",
-                "reason": "Qwen调用失败，已自动回退到确定性规则；正式数据未受影响。",
-            })
+    book = load_workbook_compat(archived, data_only=True, read_only=False)
+    try:
+        parser_key = _detect_adapter(book)
+        if parser_key == "standard_template":
+            rows, warnings = _parse_standard(book, batch)
+            ai_result = {
+                "status": "not_needed",
+                "model": config.QWEN_MODEL,
+                "usage": {},
+                "applied": 0,
+            }
+        elif parser_key == "work_log":
+            rows, warnings = _parse_work_log(book, batch, station)
+            ai_result = _apply_ai_suggestions(
+                rows, batch=batch, station=station
+            )
+        else:
+            rows, warnings = _parse_monthly_shift_log(book, batch, station)
+            ai_result = _apply_ai_suggestions(
+                rows, batch=batch, station=station
+            )
+        if parser_key != "standard_template":
+            if ai_result["status"] == "not_configured":
+                warnings.append({
+                    "sheet": "AI",
+                    "field": "AI",
+                    "reason": "Qwen尚未配置，已使用确定性规则生成预览。",
+                })
+            elif ai_result["status"] == "fallback":
+                warnings.append({
+                    "sheet": "AI",
+                    "field": "AI",
+                    "reason": "Qwen调用失败，已自动回退到确定性规则；正式数据未受影响。",
+                })
+    finally:
+        book.close()
     _mark_duplicates(db, meta_id, rows)
 
     job = ImportJob(

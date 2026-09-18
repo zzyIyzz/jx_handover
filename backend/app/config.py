@@ -25,7 +25,7 @@ from urllib.parse import urlsplit
 from dotenv import load_dotenv
 
 
-FALLBACK_APP_VERSION = "0.5.3"
+FALLBACK_APP_VERSION = "0.5.4"
 
 
 def _env_bool(name: str, default: bool) -> bool:

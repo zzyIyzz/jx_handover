@@ -15,7 +15,7 @@ from typing import Any
 import uuid
 
 
-FALLBACK_APP_VERSION = "0.5.3"
+FALLBACK_APP_VERSION = "0.5.4"
 DEFAULT_QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 DEFAULT_MODEL = "qwen3.8-flash"
 

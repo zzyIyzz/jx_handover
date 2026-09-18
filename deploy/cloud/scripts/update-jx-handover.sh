@@ -1,0 +1,810 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+# ============================================================
+# 江西片区智能交接班系统 - 安全一键更新脚本 V0.5.4
+# 适配：Alibaba Cloud Linux 4 / Python 3.11 / Node.js 22
+# ============================================================
+
+PROJECT="${PROJECT:-/www/wwwroot/jx_handover}"
+REPO="${REPO:-https://ghproxy.net/https://github.com/zzyIyzz/jx_handover.git}"
+BRANCH="${BRANCH:-release/v0.5.4}"
+SERVICE="${SERVICE:-jx-handover}"
+PORT="${PORT:-8765}"
+
+VENV="$PROJECT/.venv"
+BACKUP_ROOT="${BACKUP_ROOT:-/www/backup/jx_handover}"
+SERVICE_FILE="/etc/systemd/system/${SERVICE}.service"
+
+PIP_INDEX="${PIP_INDEX:-https://mirrors.cloud.aliyuncs.com/pypi/simple/}"
+NPM_REGISTRY_PRIMARY="${NPM_REGISTRY_PRIMARY:-https://registry.npmmirror.com}"
+NPM_REGISTRY_FALLBACK="${NPM_REGISTRY_FALLBACK:-https://registry.npmjs.org}"
+
+OLD_COMMIT=""
+OLD_BRANCH=""
+REMOTE_COMMIT=""
+NEW_COMMIT=""
+CODE_UPDATED=0
+BACKUP_DIR=""
+BACKUP_ROOT_REAL=""
+LOCAL_STASH_REF=""
+HEALTH_FILE=""
+UPDATE_SUCCEEDED=0
+DEPLOY_STARTED=0
+ENV_EXISTED=0
+SERVICE_FILE_EXISTED=0
+SERVICE_WAS_ACTIVE=0
+SERVICE_WAS_ENABLED=0
+SERVICE_STOPPED_FOR_BACKUP=0
+AI_KEY_INPUT="${QWEN_API_KEY:-}"
+AI_KEY_SOURCE=""
+AI_KEY_HINT=""
+
+# Do not leave the secret exported to child commands.  It is written only to
+# the root-readable .env file after the backup has been created.
+unset QWEN_API_KEY || true
+
+info() {
+    echo
+    echo "============================================================"
+    echo "$1"
+    echo "============================================================"
+}
+
+success() { echo "[成功] $1"; }
+warn() { echo "[警告] $1"; }
+error() { echo "[错误] $1" >&2; }
+
+read_env_value() {
+    local file="$1"
+    local key="$2"
+    [ -f "$file" ] || return 1
+    awk -v wanted="$key" '
+        $0 ~ "^[[:space:]]*" wanted "[[:space:]]*=" {
+            value=$0
+            sub("^[[:space:]]*" wanted "[[:space:]]*=[[:space:]]*", "", value)
+            sub(/\r$/, "", value)
+            if (value ~ /^".*"$/ || value ~ /^\047.*\047$/) {
+                value=substr(value, 2, length(value)-2)
+            }
+            found=value
+        }
+        END { if (found != "") print found; else exit 1 }
+    ' "$file"
+}
+
+set_env_value() {
+    local file="$1"
+    local key="$2"
+    local value="$3"
+    local temp=""
+    temp="$(mktemp "${file}.tmp.XXXXXX")"
+    JX_ENV_REPLACEMENT="$value" awk -v wanted="$key" '
+        BEGIN { done=0; replacement=ENVIRON["JX_ENV_REPLACEMENT"] }
+        $0 ~ "^[[:space:]]*" wanted "[[:space:]]*=" {
+            if (!done) print wanted "=" replacement
+            done=1
+            next
+        }
+        { print }
+        END { if (!done) print wanted "=" replacement }
+    ' "$file" > "$temp"
+    chmod --reference="$file" "$temp" 2>/dev/null || chmod 600 "$temp"
+    chown --reference="$file" "$temp" 2>/dev/null || true
+    mv -f -- "$temp" "$file"
+}
+
+is_real_ai_key() {
+    local value="${1:-}"
+    [ -n "$value" ] \
+        && [[ "$value" != *"你的"* ]] \
+        && [[ "$value" != *"your"* ]] \
+        && [[ "$value" != *"YOUR"* ]] \
+        && [[ "$value" != *"<"* ]] \
+        && [[ "$value" != *">"* ]]
+}
+
+find_saved_ai_key() {
+    local candidate=""
+    local value=""
+    local -a candidates=()
+
+    if is_real_ai_key "$AI_KEY_INPUT"; then
+        AI_KEY_SOURCE="执行脚本时提供的 QWEN_API_KEY"
+        return 0
+    fi
+
+    value="$(read_env_value "$PROJECT/.env" QWEN_API_KEY 2>/dev/null || true)"
+    if is_real_ai_key "$value"; then
+        AI_KEY_INPUT="$value"
+        AI_KEY_SOURCE="现有 $PROJECT/.env"
+        return 0
+    fi
+
+    mapfile -t candidates < <(
+        find "$BACKUP_ROOT_REAL" -mindepth 2 -maxdepth 2 -type f \
+            \( -name '.env' -o -name '.env.example.server-copy' \) \
+            -printf '%T@ %p\n' 2>/dev/null | sort -nr | cut -d' ' -f2-
+    )
+    for candidate in "${candidates[@]}"; do
+        value="$(read_env_value "$candidate" QWEN_API_KEY 2>/dev/null || true)"
+        if is_real_ai_key "$value"; then
+            AI_KEY_INPUT="$value"
+            AI_KEY_SOURCE="历史备份 $(dirname "$candidate")"
+            return 0
+        fi
+    done
+    return 1
+}
+
+configure_ai() {
+    local env_file="$PROJECT/.env"
+    local old_mode=""
+
+    old_mode="$(read_env_value "$env_file" AI_MODE 2>/dev/null || true)"
+    set_env_value "$env_file" AI_MODE auto
+    set_env_value "$env_file" QWEN_BASE_URL \
+        "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    set_env_value "$env_file" QWEN_MODEL "qwen3.8-flash"
+    set_env_value "$env_file" AI_STRUCTURED_MODE "json_schema"
+    set_env_value "$env_file" AI_TIMEOUT_SECONDS "60"
+
+    if find_saved_ai_key; then
+        set_env_value "$env_file" QWEN_API_KEY "$AI_KEY_INPUT"
+        chmod 600 "$env_file"
+        AI_KEY_HINT="****${AI_KEY_INPUT: -4}"
+        success "Qwen AI 已配置为 auto；密钥已从${AI_KEY_SOURCE}安全迁移（${AI_KEY_HINT}）"
+    else
+        set_env_value "$env_file" QWEN_API_KEY ""
+        chmod 600 "$env_file"
+        warn "已将 AI_MODE 从 ${old_mode:-未配置} 调整为 auto，但没有找到真实 QWEN_API_KEY。"
+        warn "本次升级会继续完成；随后请运行同目录的 restore-ai.sh 安全填写 Key。"
+    fi
+}
+
+cleanup_temp() {
+    if [ -n "$HEALTH_FILE" ] && [ -f "$HEALTH_FILE" ]; then
+        rm -f -- "$HEALTH_FILE"
+    fi
+}
+
+show_npm_log() {
+    local logfile=""
+    logfile="$(find /root/.npm/_logs -maxdepth 1 -type f -name '*-debug-0.log' -printf '%T@ %p\n' 2>/dev/null \
+        | sort -nr | head -n 1 | cut -d' ' -f2- || true)"
+    if [ -n "$logfile" ] && [ -f "$logfile" ]; then
+        echo
+        echo "========== 最近 npm 错误日志 =========="
+        tail -n 120 "$logfile" || true
+        echo "========================================="
+    fi
+}
+
+install_python_requirements() {
+    # shellcheck disable=SC1091
+    source "$VENV/bin/activate"
+    export PIP_INDEX_URL="$PIP_INDEX"
+    export PIP_DISABLE_PIP_VERSION_CHECK=1
+    export PIP_NO_CACHE_DIR=1
+    export PIP_DEFAULT_TIMEOUT=120
+
+    python -m pip --version
+    python -m pip install --no-cache-dir --retries 5 --timeout 120 \
+        -r "$PROJECT/backend/requirements.txt"
+}
+
+install_frontend() {
+    cd "$PROJECT/frontend"
+
+    export npm_config_fetch_retries=5
+    export npm_config_fetch_retry_mintimeout=20000
+    export npm_config_fetch_retry_maxtimeout=120000
+    export npm_config_fetch_timeout=300000
+
+    rm -rf -- "$PROJECT/frontend/node_modules"
+
+    if [ -f "$PROJECT/frontend/package-lock.json" ]; then
+        echo "检测到 package-lock.json，使用 npm ci（严格按锁文件安装）"
+        if ! npm ci --registry="$NPM_REGISTRY_PRIMARY" --no-audit --no-fund; then
+            warn "npmmirror 安装失败，使用 npm 官方 registry 再重试一次"
+            rm -rf -- "$PROJECT/frontend/node_modules"
+            if ! npm ci --registry="$NPM_REGISTRY_FALLBACK" --no-audit --no-fund; then
+                error "npm ci 失败；不会自动执行 npm install，也不会修改 package-lock.json。"
+                show_npm_log
+                return 1
+            fi
+        fi
+    else
+        warn "仓库没有 package-lock.json，只能使用 npm install"
+        if ! npm install --registry="$NPM_REGISTRY_PRIMARY" --no-audit --no-fund; then
+            warn "npmmirror 安装失败，使用 npm 官方 registry 再重试一次"
+            npm install --registry="$NPM_REGISTRY_FALLBACK" --no-audit --no-fund
+        fi
+    fi
+
+    npm run build
+    if [ ! -f "$PROJECT/frontend/dist/index.html" ]; then
+        error "前端构建结束，但未发现 frontend/dist/index.html"
+        return 1
+    fi
+}
+
+backup_git_state() {
+    git status --short --branch > "$BACKUP_DIR/git-status.txt"
+    git diff --binary > "$BACKUP_DIR/git-working-tree.patch"
+    git diff --cached --binary > "$BACKUP_DIR/git-index.patch"
+}
+
+handle_local_changes() {
+    local changed_file=""
+    local -a changed_files=()
+
+    mapfile -t changed_files < <(
+        {
+            git diff --name-only
+            git diff --cached --name-only
+            git ls-files --others --exclude-standard
+        } | sed '/^$/d' | sort -u
+    )
+
+    if [ "${#changed_files[@]}" -eq 0 ]; then
+        success "Git 工作区干净"
+        return 0
+    fi
+
+    warn "发现服务器项目目录存在未提交修改："
+    git status --short
+    backup_git_state
+
+    if [ "${#changed_files[@]}" -ne 1 ] || [ "${changed_files[0]}" != ".env.example" ]; then
+        echo
+        error "除 .env.example 外还存在其他本地修改，本次更新安全终止。"
+        error "修改清单和补丁已保存到：$BACKUP_DIR"
+        error "脚本没有覆盖或删除这些文件，请人工确认后重新执行。"
+        return 1
+    fi
+
+    changed_file="${changed_files[0]}"
+    cp -a -- "$PROJECT/$changed_file" "$BACKUP_DIR/.env.example.server-copy"
+
+    warn "检测到的唯一修改是 .env.example，将先完整归档再继续更新。"
+    git stash push --message "jx-handover-env-example-$(date +%Y%m%d_%H%M%S)" -- "$changed_file"
+    LOCAL_STASH_REF="$(git rev-parse 'stash@{0}')"
+    printf '%s\n' "$LOCAL_STASH_REF" > "$BACKUP_DIR/git-stash-commit.txt"
+
+    if [ -n "$(git status --porcelain)" ]; then
+        error "归档 .env.example 后工作区仍不干净，本次更新安全终止。"
+        git status --short
+        return 1
+    fi
+
+    success ".env.example 已保存到 Git stash 和外部备份"
+    echo "stash Commit：$LOCAL_STASH_REF"
+    echo "外部备份：$BACKUP_DIR/.env.example.server-copy"
+}
+
+rollback() {
+    local exit_code="$1"
+    trap - EXIT
+
+    echo
+    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+    echo "更新未完成（退出码：$exit_code）"
+    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+
+    if [ "$DEPLOY_STARTED" = "1" ] && [ -n "$OLD_COMMIT" ] && [ -d "$PROJECT/.git" ]; then
+        warn "尝试将代码回退到更新前 Commit：$OLD_COMMIT"
+        cd "$PROJECT" || true
+
+        if [ -n "$OLD_BRANCH" ] && git show-ref --verify --quiet "refs/heads/$OLD_BRANCH"; then
+            if git checkout --force "$OLD_BRANCH" \
+                && [ "$(git symbolic-ref --quiet --short HEAD || true)" = "$OLD_BRANCH" ]; then
+                git reset --hard "$OLD_COMMIT" || true
+            else
+                error "无法切回更新前分支 $OLD_BRANCH；为避免重置错误分支，已停止 Git 自动回滚。"
+            fi
+        else
+            git checkout --force --detach "$OLD_COMMIT" || \
+                error "无法恢复到更新前的分离 HEAD：$OLD_COMMIT"
+        fi
+
+        if [ "$ENV_EXISTED" = "1" ] && [ -f "$BACKUP_DIR/.env" ]; then
+            cp -a -- "$BACKUP_DIR/.env" "$PROJECT/.env" || true
+        elif [ "$ENV_EXISTED" = "0" ]; then
+            rm -f -- "$PROJECT/.env" || true
+        fi
+
+        if [ "$SERVICE_FILE_EXISTED" = "1" ] && [ -f "$BACKUP_DIR/${SERVICE}.service" ]; then
+            cp -a -- "$BACKUP_DIR/${SERVICE}.service" "$SERVICE_FILE" || true
+        elif [ "$SERVICE_FILE_EXISTED" = "0" ]; then
+            rm -f -- "$SERVICE_FILE" || true
+        fi
+        systemctl daemon-reload || true
+
+        if [ -d "$VENV" ] && [ -f "$PROJECT/backend/requirements.txt" ]; then
+            install_python_requirements || true
+        fi
+        if [ -d "$PROJECT/frontend" ]; then
+            install_frontend || true
+        fi
+
+        if [ "$SERVICE_WAS_ENABLED" = "1" ]; then
+            systemctl enable "$SERVICE" >/dev/null 2>&1 || true
+        else
+            systemctl disable "$SERVICE" >/dev/null 2>&1 || true
+        fi
+        if [ "$SERVICE_WAS_ACTIVE" = "1" ]; then
+            systemctl restart "$SERVICE" 2>/dev/null || \
+                error "旧服务未能重新启动，请立即检查 journalctl。"
+        else
+            systemctl stop "$SERVICE" 2>/dev/null || true
+        fi
+        warn "已尝试恢复更新前代码、配置、依赖和服务状态。"
+    fi
+
+    if [ "$DEPLOY_STARTED" = "0" ] && [ "$SERVICE_STOPPED_FOR_BACKUP" = "1" ]; then
+        systemctl start "$SERVICE" || error "备份失败后旧服务未能重新启动，请立即检查 journalctl。"
+    fi
+
+    if [ -n "$LOCAL_STASH_REF" ]; then
+        warn "原 .env.example 修改仍保存在 Git stash：$LOCAL_STASH_REF"
+        echo "需要查看时：cd '$PROJECT' && git stash list"
+    fi
+    if [ -n "$BACKUP_DIR" ]; then
+        echo "本次备份目录：$BACKUP_DIR"
+    fi
+
+    echo "正式数据不会被自动覆盖恢复，避免误覆盖运行数据。"
+    echo "查看服务日志：journalctl -u $SERVICE -n 100 --no-pager"
+    cleanup_temp
+    exit "$exit_code"
+}
+
+on_exit() {
+    local exit_code=$?
+    if [ "$exit_code" -ne 0 ] && [ "$UPDATE_SUCCEEDED" != "1" ]; then
+        rollback "$exit_code"
+    fi
+    cleanup_temp
+}
+
+trap on_exit EXIT
+
+main() {
+    clear 2>/dev/null || true
+
+    echo "============================================================"
+    echo "       江西片区智能交接班系统 - 安全一键更新"
+    echo "============================================================"
+    echo
+    echo "GitHub：$REPO"
+    echo "分支：$BRANCH"
+    echo "目录：$PROJECT"
+    echo "端口：$PORT"
+    echo
+
+    # 1. 环境检查
+    info "1/10 检查服务器环境"
+
+    if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+        error "请使用 root 权限执行：sudo bash $0"
+        return 1
+    fi
+
+    local required_commands=(git python3 node npm curl systemctl tar find sort sed readlink)
+    local cmd=""
+    for cmd in "${required_commands[@]}"; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            error "缺少命令：$cmd"
+            return 1
+        fi
+    done
+
+    mkdir -p "$BACKUP_ROOT"
+    BACKUP_ROOT_REAL="$(readlink -f "$BACKUP_ROOT")"
+    if [ -z "$BACKUP_ROOT_REAL" ] || [ "$BACKUP_ROOT_REAL" = "/" ] \
+        || [[ "$BACKUP_ROOT_REAL" != /* ]]; then
+        error "BACKUP_ROOT 必须是有效的绝对目录，且不能是根目录：$BACKUP_ROOT"
+        return 1
+    fi
+    if command -v flock >/dev/null 2>&1; then
+        exec 9>"$BACKUP_ROOT/.update.lock"
+        if ! flock -n 9; then
+            error "已有另一个更新进程正在运行，请勿重复执行。"
+            return 1
+        fi
+    else
+        warn "系统没有 flock，无法启用并发更新锁。"
+    fi
+
+    success "服务器基本环境正常"
+    echo "Git：$(git --version)"
+    echo "Python：$(python3 --version)"
+    echo "Node：$(node --version)"
+    echo "NPM：$(npm --version)"
+
+    # 2. 项目检查 / 首次 Clone
+    info "2/10 检查项目"
+
+    if [ ! -d "$PROJECT/.git" ]; then
+        if [ -e "$PROJECT" ] && [ -n "$(find "$PROJECT" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]; then
+            error "项目目录已存在且非空，但不是 Git 仓库：$PROJECT"
+            return 1
+        fi
+        warn "未发现现有项目，开始首次拉取"
+        mkdir -p "$(dirname "$PROJECT")"
+        git clone --branch "$BRANCH" --single-branch "$REPO" "$PROJECT"
+        success "GitHub 项目下载完成"
+    else
+        success "已发现现有项目"
+    fi
+
+    cd "$PROJECT"
+
+    # 3. Git 检查
+    # Check before deployment so even rollback cannot trigger a pending restore.
+    if [ -x "$VENV/bin/python" ]; then
+        (cd "$PROJECT/backend" && "$VENV/bin/python" - <<'PY'
+from app import config
+markers = [config.SNAPSHOT_DIR / "restore" / "pending.json"]
+markers += [config.SOURCE_BASE / name / "snapshots" / "restore" / "pending.json"
+            for name in ("runtime", "runtime-server")]
+if any(marker.exists() for marker in markers):
+    print("[错误] 存在待执行的数据恢复；请先在管理页确认并取消待恢复，再更新。")
+    raise SystemExit(1)
+PY
+        )
+    elif [ -f "$PROJECT/.env" ]; then
+        error "现有项目缺少可用的 Python 虚拟环境，无法安全检查待恢复状态。"
+        return 1
+    fi
+
+    info "3/10 检查 Git 和目标发布分支"
+
+    git remote set-url origin "$REPO"
+    # 使用完整 refspec，确保 origin/$BRANCH 一定更新，而不只是 FETCH_HEAD。
+    git fetch --prune origin \
+        "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
+
+    if ! git show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+        error "远程分支不存在：origin/$BRANCH"
+        return 1
+    fi
+
+    OLD_COMMIT="$(git rev-parse HEAD)"
+    OLD_BRANCH="$(git symbolic-ref --quiet --short HEAD || true)"
+    REMOTE_COMMIT="$(git rev-parse "origin/$BRANCH")"
+
+    echo "当前分支：${OLD_BRANCH:-（分离 HEAD）}"
+    echo "当前 Commit：$OLD_COMMIT"
+    echo "远程分支：origin/$BRANCH"
+    echo "远程 Commit：$REMOTE_COMMIT"
+
+    # 已存在的目标分支如果含远程没有的提交，不自动抹掉。
+    if git show-ref --verify --quiet "refs/heads/$BRANCH" \
+        && ! git merge-base --is-ancestor "$BRANCH" "origin/$BRANCH"; then
+        error "本地 $BRANCH 含远程分支没有的提交，无法安全快进。"
+        error "请人工确认这些提交后再更新；脚本没有重置本地提交。"
+        return 1
+    fi
+
+    local timestamp=""
+    timestamp="$(date +%Y%m%d_%H%M%S)_${BASHPID}"
+    BACKUP_DIR="$BACKUP_ROOT_REAL/$timestamp"
+    if ! mkdir "$BACKUP_DIR"; then
+        error "无法创建唯一备份目录：$BACKUP_DIR"
+        return 1
+    fi
+
+    handle_local_changes
+
+    # 4. 备份正式数据和配置
+    info "4/10 备份正式数据、配置和服务文件"
+
+    local backed_up=0
+    if [ -f "$PROJECT/.env" ]; then
+        ENV_EXISTED=1
+        cp -a -- "$PROJECT/.env" "$BACKUP_DIR/.env"
+        success ".env 已备份"
+    fi
+
+    if [ -f "$SERVICE_FILE" ]; then
+        SERVICE_FILE_EXISTED=1
+        cp -a -- "$SERVICE_FILE" "$BACKUP_DIR/${SERVICE}.service"
+        success "systemd 服务文件已备份"
+    fi
+
+    if systemctl is-active --quiet "$SERVICE" 2>/dev/null; then
+        SERVICE_WAS_ACTIVE=1
+    fi
+    if systemctl is-enabled --quiet "$SERVICE" 2>/dev/null; then
+        SERVICE_WAS_ENABLED=1
+    fi
+
+    # Stop the sole application writer before archiving SQLite DB/WAL and files.
+    # Failures before DEPLOY_STARTED restart the original service without reset.
+    if [ "$SERVICE_WAS_ACTIVE" = "1" ]; then
+        SERVICE_STOPPED_FOR_BACKUP=1
+        systemctl stop "$SERVICE"
+    fi
+    if systemctl is-active --quiet "$SERVICE"; then
+        error "服务仍在运行，拒绝制作可能不一致的数据备份。"
+        return 1
+    fi
+
+    local data_name=""
+    for data_name in runtime runtime-server; do
+        if [ -d "$PROJECT/$data_name" ]; then
+            tar -czf "$BACKUP_DIR/$data_name.tar.gz" -C "$PROJECT" "$data_name"
+            tar -tzf "$BACKUP_DIR/$data_name.tar.gz" >/dev/null
+            success "$data_name 已在停服状态下备份并校验"
+            backed_up=1
+        fi
+    done
+
+    local custom_data_dir=""
+    if [ -x "$VENV/bin/python" ]; then
+        custom_data_dir="$(cd "$PROJECT/backend" && "$VENV/bin/python" - <<'PY'
+from app import config
+print(config.USER_DATA_ROOT.resolve())
+PY
+        )"
+    elif [ -f "$PROJECT/.env" ]; then
+        custom_data_dir="$(grep -E '^JX_HANDOVER_DATA_DIR=' "$PROJECT/.env" | tail -n 1 \
+            | cut -d '=' -f2- | tr -d '\r' \
+            | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//" || true)"
+    fi
+
+    if [ -n "$custom_data_dir" ] && [ -d "$custom_data_dir" ]; then
+        local custom_real=""
+        local default_real=""
+        custom_real="$(readlink -f "$custom_data_dir")"
+        default_real="$(readlink -f "$PROJECT/runtime-server" 2>/dev/null || true)"
+        if [ -z "$custom_real" ] || [ "$custom_real" = "/" ] \
+            || [ "$custom_real" = "$BACKUP_ROOT_REAL" ] \
+            || [[ "$PROJECT/" == "$custom_real/"* ]] \
+            || [[ "$BACKUP_ROOT_REAL/" == "$custom_real/"* ]]; then
+            error "JX_HANDOVER_DATA_DIR 指向过宽或危险的目录：$custom_real"
+            return 1
+        fi
+        if [ "$custom_real" != "$default_real" ] \
+            && [ "$custom_real" != "$(readlink -f "$PROJECT/runtime" 2>/dev/null || true)" ]; then
+            tar -czf "$BACKUP_DIR/custom-data.tar.gz" -C "$custom_real" .
+            tar -tzf "$BACKUP_DIR/custom-data.tar.gz" >/dev/null
+            success "自定义数据目录已备份并校验：$custom_real"
+            backed_up=1
+        fi
+    fi
+
+    if [ "$backed_up" = "0" ]; then
+        warn "当前未发现运行数据目录，首次部署时属于正常现象"
+    fi
+    echo "本次备份位置：$BACKUP_DIR"
+
+    # 从这里开始，任何失败都需要恢复代码、配置和服务状态。
+    DEPLOY_STARTED=1
+
+    # 5. 快进同步发布分支
+    info "5/10 同步 GitHub 发布分支"
+
+    echo "更新前：$OLD_COMMIT"
+    echo "发布版：$REMOTE_COMMIT"
+
+    if [ "$OLD_BRANCH" != "$BRANCH" ] || [ "$OLD_COMMIT" != "$REMOTE_COMMIT" ]; then
+        CODE_UPDATED=1
+        if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+            git checkout "$BRANCH"
+        else
+            git checkout -b "$BRANCH" --track "origin/$BRANCH"
+        fi
+        git merge --ff-only "origin/$BRANCH"
+    fi
+
+    NEW_COMMIT="$(git rev-parse HEAD)"
+    if [ "$NEW_COMMIT" != "$REMOTE_COMMIT" ]; then
+        error "同步后 HEAD 与 origin/$BRANCH 不一致。"
+        return 1
+    fi
+    success "服务器代码已同步到 origin/$BRANCH"
+
+    git log -1 --pretty=format:"当前代码：%h%n提交说明：%s%n提交时间：%cd" \
+        --date=format:"%Y-%m-%d %H:%M:%S"
+    echo
+
+    # 6. .env
+    info "6/10 检查服务端配置"
+
+    if [ ! -f "$PROJECT/.env" ]; then
+        if [ ! -f "$PROJECT/.env.example" ]; then
+            error "仓库中不存在 .env.example，无法自动创建 .env"
+            return 1
+        fi
+        cp "$PROJECT/.env.example" "$PROJECT/.env"
+        warn "未发现 .env，已从新版 .env.example 创建；请核对业务配置。"
+    fi
+
+    set_env_value "$PROJECT/.env" JX_HANDOVER_MODE server
+    configure_ai
+    success ".env 已保留，并确保 JX_HANDOVER_MODE=server、AI_MODE=auto"
+
+    # 7. Python
+    info "7/10 更新 Python 后端"
+    cd "$PROJECT"
+    if [ ! -d "$VENV" ]; then
+        echo "首次创建 Python 虚拟环境..."
+        python3 -m venv "$VENV"
+    fi
+    install_python_requirements
+    success "Python 后端依赖更新完成"
+
+    # 8. Vue
+    info "8/10 编译 Vue 前端"
+    install_frontend
+    success "Vue 前端依赖安装及构建完成"
+
+    # 9. systemd
+    info "9/10 配置并重启后台服务"
+
+    cat > "$SERVICE_FILE" <<EOF
+[Unit]
+Description=JX Handover System
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=$PROJECT/backend
+EnvironmentFile=-$PROJECT/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONPATH=$PROJECT/backend
+ExecStart=$VENV/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable "$SERVICE" >/dev/null
+    systemctl restart "$SERVICE"
+    sleep 3
+
+    if ! systemctl is-active --quiet "$SERVICE"; then
+        error "交接班服务启动失败"
+        journalctl -u "$SERVICE" -n 100 --no-pager
+        return 1
+    fi
+    success "systemd 服务运行正常"
+
+    # 10. 健康检查
+    info "10/10 系统健康检查"
+
+    local health_url="http://127.0.0.1:${PORT}/api/health"
+    local health_ok=0
+    local i=0
+    HEALTH_FILE="$(mktemp /tmp/jx_handover_health.XXXXXX.json)"
+
+    for i in {1..15}; do
+        if curl --fail --silent --show-error --connect-timeout 3 --max-time 10 \
+            "$health_url" > "$HEALTH_FILE" 2>/dev/null; then
+            health_ok=1
+            break
+        fi
+        echo "等待服务启动 ($i/15)..."
+        sleep 2
+    done
+
+    if [ "$health_ok" != "1" ]; then
+        error "API 健康检查失败"
+        journalctl -u "$SERVICE" -n 100 --no-pager
+        return 1
+    fi
+
+    success "API 健康检查通过"
+    cat "$HEALTH_FILE"
+    echo
+
+    info "AI 配置检查"
+    local ai_check=""
+    ai_check="$(cd "$PROJECT/backend" && "$VENV/bin/python" - <<'PY'
+from app import config
+
+hint = f"****{config.QWEN_API_KEY[-4:]}" if config.QWEN_API_KEY else "未填写"
+print(f"requested={config.AI_MODE_REQUESTED}")
+print(f"effective={config.AI_MODE}")
+print(f"model={config.QWEN_MODEL}")
+print(f"key={hint}")
+if config.AI_MODE_REQUESTED != "auto":
+    raise SystemExit(2)
+if config.QWEN_API_KEY and config.AI_MODE != "qwen":
+    raise SystemExit(3)
+PY
+)"
+    printf '%s\n' "$ai_check"
+    if grep -q '^effective=qwen$' <<<"$ai_check"; then
+        echo "正在调用 Qwen 做真实连接测试……"
+        if (cd "$PROJECT/backend" && "$VENV/bin/python" - <<'PY'
+from app.services.ai.adapter import test_qwen_connection
+result = test_qwen_connection()
+print(result.get("message", ""))
+if not result.get("ok") or result.get("mode") != "qwen":
+    raise SystemExit(1)
+PY
+        ); then
+            success "真实 Qwen AI 已通过连接测试。"
+        else
+            warn "程序已升级，但真实 Qwen 连接未通过；当前仍可能回退本地规则。"
+            warn "请检查 Key 权限、余额和外网，然后运行 restore-ai.sh；不会因 AI 外网故障回滚 Excel 修复。"
+        fi
+    else
+        warn "AI 代码已恢复为自动模式，但尚无 Key，当前仍会使用本地规则。"
+        warn "执行：sudo env PROJECT='$PROJECT' SERVICE='$SERVICE' bash restore-ai.sh"
+    fi
+
+    info "清理历史备份"
+    local -a old_backups=()
+    local old_backup=""
+    local old_backup_real=""
+    local old_backup_name=""
+    local valid_index=0
+    mapfile -t old_backups < <(
+        find "$BACKUP_ROOT_REAL" -mindepth 1 -maxdepth 1 -type d \
+            -printf '%T@ %p\n' 2>/dev/null | sort -nr | cut -d' ' -f2-
+    )
+    for old_backup in "${old_backups[@]}"; do
+        old_backup_name="$(basename "$old_backup")"
+        if [[ ! "$old_backup_name" =~ ^20[0-9]{6}_[0-9]{6}_[0-9]+$ ]]; then
+            continue
+        fi
+        valid_index=$((valid_index + 1))
+        if [ "$valid_index" -le 10 ] || [ "$old_backup" = "$BACKUP_DIR" ]; then
+            continue
+        fi
+        old_backup_real="$(readlink -f "$old_backup" 2>/dev/null || true)"
+        if [ -n "$old_backup_real" ] \
+            && [ "$(dirname "$old_backup_real")" = "$BACKUP_ROOT_REAL" ] \
+            && [ "$old_backup_real" != "$BACKUP_DIR" ]; then
+            if ! rm -rf -- "$old_backup_real"; then
+                warn "旧备份清理失败（不影响本次更新）：$old_backup_real"
+            fi
+        else
+            warn "跳过异常备份路径：$old_backup"
+        fi
+    done
+    success "仅保留最近 10 次更新备份"
+
+    UPDATE_SUCCEEDED=1
+    cleanup_temp
+
+    echo
+    echo "############################################################"
+    echo "#                    更新成功                              #"
+    echo "############################################################"
+    echo "项目目录：$PROJECT"
+    echo "GitHub 分支：$BRANCH"
+    echo "更新前：$OLD_COMMIT"
+    echo "更新后：$NEW_COMMIT"
+    echo "备份目录：$BACKUP_DIR"
+    echo "服务名称：$SERVICE"
+    echo "监听端口：$PORT"
+
+    if [ -n "$LOCAL_STASH_REF" ]; then
+        echo
+        echo "原 .env.example 修改已归档，不会自动恢复："
+        echo "  stash Commit：$LOCAL_STASH_REF"
+        echo "  外部副本：$BACKUP_DIR/.env.example.server-copy"
+        echo "  请人工将仍需要的配置项迁移到正式 .env。"
+    fi
+
+    echo
+    git log -1 --pretty=format:"当前版本：%h%n提交说明：%s%n提交时间：%cd" \
+        --date=format:"%Y-%m-%d %H:%M:%S"
+    echo
+    echo
+    echo "健康检查：$health_url"
+    echo "浏览器访问：http://你的服务器IP:$PORT"
+    echo
+}
+
+main "$@"
