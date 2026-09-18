@@ -107,6 +107,7 @@ export interface RestoreRequestView {
 }
 export interface RestoreStateView {
   pending: RestoreRequestView | null; last_result: RestoreRequestView | null
+  restart_instruction?: string
 }
 export interface NasTestView {
   configured: boolean; ok: boolean; identity: string; path: string

@@ -25,6 +25,7 @@ from app.security import (
 )
 from app.services import data_root as data_root_service
 from app.services.backup import (
+    apply_pending_restore,
     backup_status,
     maybe_daily_backup,
     pending_restore_status,
@@ -76,6 +77,13 @@ app.include_router(handovers.router)
 def startup() -> None:
     global STARTUP_ADMINS_MISSING
     config.validate_runtime_configuration()
+    # Restore before legacy adoption, migrations, or seeding can change data.
+    # Any interrupted/failed recovery raises here and keeps the service closed.
+    restored = apply_pending_restore()
+    if restored:
+        logging.getLogger(__name__).warning(
+            "启动前数据恢复：%s", restored.get("state")
+        )
     # Rescue an existing database before migrations create an empty one,
     # otherwise a mode change would silently start a brand-new roster.
     adoption = data_root_service.adopt_legacy_data_root()

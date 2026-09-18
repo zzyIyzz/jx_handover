@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import sys
 import shutil
 import sqlite3
 from typing import Optional
@@ -259,10 +260,25 @@ def sync_backup(backup_id: str):
 
 @router.get("/restore")
 def restore_state():
+    pending = pending_restore_status()
+    instruction = restore_restart_instruction()
+    if pending is not None:
+        # Old markers may contain instructions for a different host.
+        pending = {**pending, "instruction": instruction}
     return {
-        "pending": pending_restore_status(),
+        "pending": pending,
         "last_result": last_restore_result(),
+        "restart_instruction": instruction,
     }
+
+
+def restore_restart_instruction() -> str:
+    if sys.platform == "win32":
+        return "请到服务端控制器重启应用服务；恢复在应用启动前执行，无需重启整台服务器。"
+    return (
+        "请联系管理员安排维护时间，停止并重新启动应用服务（systemd / Docker 按实际部署方式操作）；"
+        "恢复在应用启动前执行，无需重启整台服务器。"
+    )
 
 
 @router.post("/backups/{backup_id}/restore/prepare")
@@ -271,14 +287,18 @@ def prepare_restore(
     identity: Identity = Depends(require_admin),
 ):
     try:
-        return schedule_restore(backup_id, requested_by=identity.name)
+        request = schedule_restore(backup_id, requested_by=identity.name)
+        return {**request, "instruction": restore_restart_instruction()}
     except Exception as exc:  # noqa: BLE001
         _raise_backup_error(exc)
 
 
 @router.delete("/restore/pending")
 def cancel_restore():
-    return cancel_scheduled_restore()
+    try:
+        return cancel_scheduled_restore()
+    except Exception as exc:
+        _raise_backup_error(exc)
 
 
 @router.get("/diagnostics")
@@ -346,10 +366,7 @@ def diagnostics(
             "unavailable_reason": config.ai_unavailable_reason(),
         },
         "backup": backup_status(),
-        "restore": {
-            "pending": pending_restore_status(),
-            "last_result": last_restore_result(),
-        },
+        "restore": restore_state(),
         "nas": {
             "configured": bool(config.NAS_BACKUP_DIR),
             "path": config.NAS_BACKUP_DIR,

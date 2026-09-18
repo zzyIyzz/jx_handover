@@ -51,7 +51,7 @@
     />
     <el-alert
       v-if="restoreState?.pending"
-      title="已安排数据恢复，等待服务器重启"
+      :title="restoreState.pending.state === 'invalid' ? '待恢复任务记录异常，请联系管理员检查' : '已安排数据恢复，尚未执行；等待应用服务安全重启'"
       type="warning"
       :closable="false"
       show-icon
@@ -59,13 +59,14 @@
     >
       <template #default>
         <div class="restore-alert-copy">
-          <span>备份 {{ shortId(restoreState.pending.backup_id) }} 已完成全量校验。{{ restartInstruction }}</span>
+          <span v-if="restoreState.pending.state === 'invalid'">{{ restoreState.pending.error }}。不要直接重启，请先核实任务或取消待恢复。</span>
+          <span v-else>目标备份 {{ restoreState.pending.backup_id }} · 申请人 {{ restoreState.pending.requested_by || '未知' }} · {{ cnDateTime(restoreState.pending.requested_at) }}。安排后继续录入的数据将被目标备份替换，请通知用户暂停操作。{{ restartInstruction }}</span>
           <el-button type="warning" link :loading="cancellingRestore" @click="cancelRestore">取消待恢复</el-button>
         </div>
       </template>
     </el-alert>
     <el-alert
-      v-else-if="restoreState?.last_result?.state === 'failed'"
+      v-if="restoreState?.last_result && ['failed', 'invalid', 'rollback_failed'].includes(restoreState.last_result.state)"
       :title="`上次恢复未完成：${restoreState.last_result.error || '请查看服务器日志'}`"
       type="error"
       :closable="false"
@@ -74,7 +75,8 @@
     />
     <el-alert
       v-else-if="restoreState?.last_result?.state === 'completed'"
-      :title="`上次恢复已完成，并已自动保留恢复前备份 ${shortId(restoreState.last_result.pre_restore_backup_id)}`"
+      title="上次恢复已完成"
+      :description="`目标备份 ${restoreState.last_result.backup_id || '未知'} · ${cnDateTime(restoreState.last_result.completed_at)}。${restoreState.last_result.pre_restore_backup_id ? `恢复前备份：${restoreState.last_result.pre_restore_backup_id}` : '本次没有恢复前备份（例如空服务器首次恢复）'}。请刷新业务页面并核对数据；如需重新登录，请使用备份中的账号。`"
       type="success"
       :closable="false"
       show-icon
@@ -419,10 +421,9 @@ const ossLabel = computed(() => {
 const ossTagType = computed(() => diagnostics.value?.oss.stale ? 'warning'
   : diagnostics.value?.oss.state === 'success' ? 'success'
   : diagnostics.value?.oss.state === 'failed' || diagnostics.value?.oss.state === 'invalid' ? 'danger' : 'info')
-const restartInstruction = computed(() => restoreState.value?.pending?.instruction
-  || (isCloud.value
-    ? '请联系管理员重启云端应用；系统会先备份当前数据，再执行恢复。'
-    : '请到服务器控制器点击“重启服务器”；系统会先备份当前数据，再执行恢复。'))
+const restartInstruction = computed(() => restoreState.value?.restart_instruction
+  || restoreState.value?.pending?.instruction
+  || '请联系管理员按实际部署方式安全重启应用服务；不需要重启整台服务器。')
 const adminSummary = computed(() => {
   const names = diagnostics.value?.administrators || []
   if (!names.length) return '无（需要恢复）'
@@ -565,7 +566,7 @@ async function syncBackup(row: BackupItem) {
 async function prepareRestore(row: BackupItem) {
   try {
     await ElMessageBox.confirm(
-      `将安排恢复到 ${cnDateTime(row.created_at)} 的数据。系统现在只做全量校验并登记任务；下次重启前还会自动备份当前全部数据。是否继续？`,
+      `将安排恢复到 ${cnDateTime(row.created_at)} 的备份（${row.backup_id}）。数据库、上传附件和生成文件将被该备份替换，账号及密码也将回到备份时状态；之后录入的数据不会合并。系统现在只校验并登记任务，下次应用启动前会备份当前数据并执行恢复。请通知用户暂停操作并安排维护时间。是否继续？`,
       '安排安全恢复',
       { type: 'warning', confirmButtonText: '校验并安排恢复', cancelButtonText: '取消' }
     )
@@ -577,9 +578,7 @@ async function prepareRestore(row: BackupItem) {
   try {
     const request = await api.adminPrepareRestore(row.backup_id)
     await refreshSafetyData()
-    ElMessage.warning(request.instruction || (isCloud.value
-      ? '恢复任务已安排。请联系管理员重启云端应用。'
-      : '恢复任务已安排。请到服务器控制器点击“重启服务器”。'))
+    ElMessage.warning(`恢复任务已安排，尚未执行。${request.instruction || restartInstruction.value}`)
   } catch (error: any) {
     ElMessage.error(error?.response?.data?.detail || error?.message || '无法安排恢复')
   } finally {

@@ -199,6 +199,8 @@ def import_backup_bundle(bundle_path: Path, data_root: Path) -> dict:
 def schedule_imported_restore(data_root: Path, imported: dict, *, requested_by: str) -> dict:
     restore_dir = data_root.expanduser().resolve() / "snapshots" / "restore"
     marker = restore_dir / "pending.json"
+    if (restore_dir / "applying.json").exists():
+        raise RuntimeError("存在未完成的数据恢复，必须先人工核实，不能安排新任务。")
     if marker.exists():
         raise FileExistsError("已有待恢复任务；请先执行或取消，不能覆盖。")
     request = {
@@ -206,13 +208,15 @@ def schedule_imported_restore(data_root: Path, imported: dict, *, requested_by: 
         "backup_id": imported["backup_id"],
         "bundle_path": imported["local_bundle_path"],
         "bundle_sha256": imported["bundle_sha256"],
+        "target_data_root": str(data_root.expanduser().resolve()),
         "requested_by": requested_by,
         "requested_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "source": "offline-nas-import",
         "instruction": "启动服务器后会先校验并恢复；新服务器没有旧数据库时直接安装恢复集。",
     }
     marker.parent.mkdir(parents=True, exist_ok=True)
-    temporary = marker.parent / f".jx-{uuid.uuid4().hex[:10]}.tmp"
-    temporary.write_text(json.dumps(request, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(temporary, marker)
+    with marker.open("x", encoding="utf-8") as stream:
+        json.dump(request, stream, ensure_ascii=False, indent=2)
+        stream.flush()
+        os.fsync(stream.fileno())
     return request

@@ -33,6 +33,7 @@ BACKUP_FORMAT = 2
 BACKUP_VERSION = config.APP_VERSION
 FULL_BACKUP_DIRNAME = "full_backups"
 RESTORE_DIRNAME = "restore"
+_restore_control_lock = threading.RLock()
 
 
 def _short_temporary_path(parent: Path, *, suffix: str = ".tmp") -> Path:
@@ -96,12 +97,25 @@ def _write_json_atomic(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = _short_temporary_path(path.parent, suffix=".json.tmp")
     try:
-        temporary.write_text(
-            json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        with temporary.open("w", encoding="utf-8") as stream:
+            json.dump(value, stream, ensure_ascii=False, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(temporary, path)
+        _sync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _sync_directory(path: Path) -> None:
+    """Persist renames on POSIX; Windows does not support directory fsync."""
+    if os.name == "nt":
+        return
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def _copy_verified_atomic(source: Path, target: Path, digest: str) -> None:
@@ -645,6 +659,13 @@ def last_restore_result() -> dict | None:
 
 
 def schedule_restore(backup_id: str, *, requested_by: str) -> dict:
+    with _restore_control_lock:
+        if (_restore_root() / "applying.json").exists():
+            raise RuntimeError("恢复正在执行或需要人工处理，不能安排新恢复。")
+        return _schedule_restore(backup_id, requested_by=requested_by)
+
+
+def _schedule_restore(backup_id: str, *, requested_by: str) -> dict:
     verified = verify_full_backup(backup_id)
     marker = _restore_root() / "pending.json"
     if marker.exists():
@@ -658,23 +679,35 @@ def schedule_restore(backup_id: str, *, requested_by: str) -> dict:
         "backup_id": backup_id,
         "bundle_path": verified["local_path"],
         "bundle_sha256": verified["bundle_sha256"],
+        "target_data_root": str(config.USER_DATA_ROOT.resolve()),
         "requested_by": requested_by,
         "requested_at": now_iso(),
         "instruction": (
-            "请在宝塔终端执行 docker compose restart app，恢复会在 Web 服务启动前执行。"
-            if config.APP_MODE == "cloud"
-            else "请在服务器控制器中点击“重启服务器”，恢复会在 Web 服务启动前执行。"
+            "请按实际部署方式重启应用服务（systemd、Docker 或 Windows 服务端控制器）；"
+            "恢复在应用启动前执行，无需重启整台服务器。"
         ),
     }
-    _write_json_atomic(marker, request)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    # O_EXCL also prevents two server processes from replacing each other's
+    # request. A partial write remains invalid and is handled fail-closed.
+    with marker.open("x", encoding="utf-8") as stream:
+        json.dump(request, stream, ensure_ascii=False, indent=2)
+        stream.flush()
+        os.fsync(stream.fileno())
+    _sync_directory(marker.parent)
     return request
 
 
 def cancel_scheduled_restore() -> dict:
-    marker = _restore_root() / "pending.json"
-    existed = marker.exists()
-    marker.unlink(missing_ok=True)
-    return {"cancelled": existed}
+    with _restore_control_lock:
+        if (_restore_root() / "applying.json").exists():
+            raise RuntimeError("恢复正在执行或需要人工处理，不能取消保护标记。")
+        marker = _restore_root() / "pending.json"
+        existed = marker.exists()
+        marker.unlink(missing_ok=True)
+        if existed:
+            _sync_directory(marker.parent)
+        return {"cancelled": existed}
 
 
 def _extract_restore_payload(bundle: Path, target: Path) -> None:
@@ -753,38 +786,78 @@ def _rewrite_snapshot_paths(database: Path) -> int:
 
 
 def apply_pending_restore() -> dict | None:
-    """Apply a verified restore before FastAPI opens the live database."""
-    marker = _restore_root() / "pending.json"
+    with _restore_control_lock:
+        return _apply_pending_restore()
+
+
+def _apply_pending_restore() -> dict | None:
+    """Fail closed after interruption; never replay partially applied restores."""
+    restore_root = _restore_root()
+    marker = restore_root / "pending.json"
+    applying = restore_root / "applying.json"
+    if applying.exists():
+        raise RuntimeError(
+            f"检测到未完成或回滚失败的数据恢复，已阻止启动和重复恢复。请保留现场，"
+            f"由管理员核对恢复日志与回滚目录：{applying}"
+        )
     if not marker.is_file():
         return None
-    request = _read_manifest(marker)
-    backup_id = str(request.get("backup_id") or "")
-    verify_full_backup(backup_id)
-    bundle, _manifest_path, _manifest = _find_backup(backup_id)
 
-    # This is the last safe point before any live path changes. A replacement
-    # server may legitimately have no database yet; in that disaster-recovery
-    # case there is nothing to preserve before installing the imported set.
-    pre_restore = (
-        create_full_backup(reason="pre-restore", replicate=False)
-        if config.DATABASE_PATH.is_file()
-        else None
-    )
-    # Restore moves must stay on the same volume as the live data. Use short
-    # roots directly below USER_DATA_ROOT so long generated filenames remain
-    # usable on Windows during both install and rollback.
+    # Exclusive, durable guard is acquired before preparation. A crash at any
+    # point leaves this file in place, including after pending.json is removed.
+    restore_root.mkdir(parents=True, exist_ok=True)
+    with applying.open("x", encoding="utf-8") as stream:
+        json.dump({"state": "applying", "started_at": now_iso()}, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
+    _sync_directory(restore_root)
+    request: dict = {}
+    pre_restore = None
     staging = config.USER_DATA_ROOT / ".r" / f"s-{uuid.uuid4().hex[:8]}"
     rollback = config.USER_DATA_ROOT / ".r" / (
         f"b-{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:4]}"
     )
-    staging.mkdir(parents=True)
-    rollback.mkdir(parents=True)
     moved: list[tuple[Path, Path]] = []
     installed: list[Path] = []
+    cleanup_staging = False
     try:
-        _extract_restore_payload(bundle, staging)
+        request = _read_manifest(marker)
+        if request.get("state") != "pending_restart":
+            raise RuntimeError("待恢复任务状态无效，已拒绝执行。")
+        target = request.get("target_data_root")
+        if (
+            target
+            and Path(str(target)).expanduser().resolve()
+            != config.USER_DATA_ROOT.resolve()
+        ):
+            raise RuntimeError("待恢复任务绑定的数据目录与当前目录不一致。")
+        backup_id = str(request.get("backup_id") or "")
+        verified = verify_full_backup(backup_id)
+        expected_digest = str(request.get("bundle_sha256") or "").lower()
+        if not expected_digest or expected_digest != str(verified["bundle_sha256"]).lower():
+            raise RuntimeError("备份 SHA256 与安排恢复时不一致，已拒绝替换数据。")
+        bundle = Path(verified["local_path"])
+        pre_restore = (
+            create_full_backup(reason="pre-restore", replicate=False)
+            if config.DATABASE_PATH.is_file() else None
+        )
+        staging.mkdir(parents=True)
+        rollback.mkdir(parents=True)
+        _write_json_atomic(applying, {
+            **request, "state": "applying", "started_at": now_iso(),
+            "staging_directory": str(staging), "rollback_directory": str(rollback),
+            "pre_restore_backup_id": pre_restore["backup_id"] if pre_restore else None,
+        })
+        # Copy the verified archive to the private workspace and bind that exact
+        # snapshot to the scheduled digest before extracting any payload.
+        private_bundle = staging / "payload.zip"
+        shutil.copy2(bundle, private_bundle)
+        if _sha256(private_bundle) != expected_digest:
+            raise RuntimeError("恢复准备期间备份发生变化，已拒绝替换数据。")
+        _extract_restore_payload(private_bundle, staging)
         prepared_database = staging / "data" / "handover.db"
         _verify_sqlite(prepared_database)
+        invalidated_sessions = _invalidate_restored_sessions(prepared_database)
         engine.dispose()
 
         live_database = config.DATABASE_PATH
@@ -824,40 +897,80 @@ def apply_pending_restore() -> dict | None:
         rewritten = _rewrite_snapshot_paths(live_database)
         _verify_sqlite(live_database)
         result = {
-            **request,
-            "state": "completed",
-            "completed_at": now_iso(),
+            **request, "state": "completed", "completed_at": now_iso(),
             "pre_restore_backup_id": pre_restore["backup_id"] if pre_restore else None,
             "rollback_directory": str(rollback),
             "rewritten_document_paths": rewritten,
+            "invalidated_sessions": invalidated_sessions,
         }
-        _write_json_atomic(_restore_root() / "last-result.json", result)
-        marker.unlink(missing_ok=True)
-        return result
+        _write_json_atomic(restore_root / "last-result.json", result)
     except Exception as exc:
         logging.exception("Restore failed; rolling back current live data")
-        engine.dispose()
-        for installed_path in reversed(installed):
-            if installed_path.is_dir():
-                shutil.rmtree(installed_path, ignore_errors=True)
-            else:
-                installed_path.unlink(missing_ok=True)
-        for source, destination in reversed(moved):
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            if source.exists():
+        rollback_errors: list[str] = []
+        try:
+            engine.dispose()
+            for installed_path in reversed(installed):
+                if installed_path.is_dir():
+                    shutil.rmtree(installed_path)
+                else:
+                    installed_path.unlink(missing_ok=True)
+            for source, destination in reversed(moved):
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if not source.exists():
+                    raise RuntimeError(f"回滚原件缺失：{source}")
                 os.replace(source, destination)
+        except Exception as rollback_exc:
+            rollback_errors.append(str(rollback_exc))
+            logging.exception("Restore rollback failed; preserving all recovery evidence")
         failed = {
             **request,
-            "state": "failed",
-            "failed_at": now_iso(),
-            "error": str(exc),
-            "pre_restore_backup_id": pre_restore.get("backup_id") if pre_restore else None,
+            "state": "rollback_failed" if rollback_errors else "failed",
+            "failed_at": now_iso(), "error": str(exc),
+            "pre_restore_backup_id": pre_restore["backup_id"] if pre_restore else None,
+            "rollback_directory": str(rollback), "staging_directory": str(staging),
+            "rollback_errors": rollback_errors,
         }
-        _write_json_atomic(_restore_root() / "last-result.json", failed)
+        # If recording this result fails, the guard intentionally remains.
+        _write_json_atomic(restore_root / "last-result.json", failed)
+        if rollback_errors:
+            _write_json_atomic(applying, failed)
+            raise RuntimeError(
+                f"数据恢复及自动回滚失败，已阻止启动；请保留回滚目录 {rollback}。"
+            ) from exc
         marker.unlink(missing_ok=True)
+        _sync_directory(restore_root)
+        applying.unlink()
+        _sync_directory(restore_root)
+        cleanup_staging = True
         raise
+    else:
+        # Terminal cleanup is deliberately outside the rollback handler. A
+        # cleanup I/O failure must not undo a successfully committed restore.
+        marker.unlink(missing_ok=True)
+        _sync_directory(restore_root)
+        applying.unlink()
+        _sync_directory(restore_root)
+        cleanup_staging = True
+        return result
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
+        if cleanup_staging:
+            shutil.rmtree(staging, ignore_errors=True)
+
+
+def _invalidate_restored_sessions(database: Path) -> int:
+    """Do not resurrect signed login tokens from an older database snapshot."""
+    connection = sqlite3.connect(str(database), timeout=30)
+    try:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(staff)")}
+        if "session_version" not in columns:
+            return 0
+        # A fresh random 52-bit value remains safe for JS integer consumers.
+        version = (uuid.uuid4().int & ((1 << 52) - 1)) or 1
+        cursor = connection.execute("UPDATE staff SET session_version=?", (version,))
+        connection.commit()
+        return cursor.rowcount
+    finally:
+        connection.close()
 
 
 def create_database_backup(*, reason: str = "manual") -> dict:
@@ -917,6 +1030,11 @@ def maybe_daily_backup() -> dict | None:
 
 
 def prune_full_backups() -> dict:
+    with _restore_control_lock:
+        return _prune_full_backups()
+
+
+def _prune_full_backups() -> dict:
     """Trim local bundles beyond retention, newest first.
 
     Only backups with a readable manifest and creation time are eligible, so
@@ -929,8 +1047,24 @@ def prune_full_backups() -> dict:
     }
     buckets: dict[str, list[dict]] = {"daily": [], "manual": []}
     skipped: list[str] = []
+    pending = pending_restore_status()
+    last_result = last_restore_result() or {}
+    protected = {
+        str((pending or {}).get("backup_id") or ""),
+        str(last_result.get("pre_restore_backup_id") or ""),
+    }
+    unsafe_restore = (
+        (_restore_root() / "applying.json").exists()
+        or (pending is not None and (
+            pending.get("state") != "pending_restart" or not pending.get("backup_id")
+        ))
+        or last_result.get("state") == "invalid"
+    )
     for item in list_full_backups():
         backup_id = str(item.get("backup_id") or "")
+        if unsafe_restore or backup_id in protected:
+            skipped.append(backup_id)
+            continue
         if not str(item.get("created_at") or "") or not item.get("local_path"):
             skipped.append(backup_id)
             continue

@@ -134,8 +134,8 @@ from app import config
 markers = [config.SNAPSHOT_DIR / "restore" / "pending.json"]
 markers += [config.SOURCE_BASE / name / "snapshots" / "restore" / "pending.json"
             for name in ("runtime", "runtime-server")]
-if any(marker.exists() for marker in markers):
-    print("[错误] 存在待执行的数据恢复；请先在管理页确认并取消待恢复，再运行本脚本。")
+if any(marker.exists() or marker.with_name("applying.json").exists() for marker in markers):
+    print("[错误] 存在待执行或未完成的数据恢复；请先按恢复验收文档核实，不能直接重启服务。")
     raise SystemExit(1)
 PY
 ); then
