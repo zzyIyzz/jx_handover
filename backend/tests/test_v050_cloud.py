@@ -368,12 +368,16 @@ class CloudSecurityUnitTest(unittest.TestCase):
         update_script = (
             PROJECT_ROOT / "deploy" / "cloud" / "scripts" / "update-jx-handover.sh"
         ).read_text(encoding="utf-8")
+        root_update_script = (
+            PROJECT_ROOT / "deploy" / "cloud" / "scripts" / "update_jx_handover.sh"
+        ).read_text(encoding="utf-8")
         restore_ai_script = (
             PROJECT_ROOT / "deploy" / "cloud" / "scripts" / "restore-ai.sh"
         ).read_text(encoding="utf-8")
         self.assertIn("/data/jx-handover/config/jx-handover.env", update_script)
         self.assertIn('JX_ADMIN_NAMES "周智源"', update_script)
         self.assertIn("verify_production_state", update_script)
+        self.assertEqual(root_update_script, update_script)
         self.assertIn("/data/jx-handover/config/jx-handover.env", restore_ai_script)
         self.assertIn("persist_env_to_data_disk", restore_ai_script)
 
