@@ -182,7 +182,7 @@
 
         <section id="chapter-6" class="chapter-card">
           <div class="chapter-heading">
-            <div><span class="chapter-no">六</span><div><h2>定期工作完成情况</h2><p>原 6.1 月度、6.2 季度始终保留；新增的 6.3 年度仅追加在其后。</p></div></div>
+            <div><span class="chapter-no">六</span><div><h2>定期工作完成情况</h2><p>原 6.1 月度、6.2 季度始终保留；新增的 6.3 年度仅追加在其后。6.3 会自动带出每项的“上次记录”（往年最近一次填写内容），录入时直接参考。</p></div></div>
           </div>
           <el-tabs v-model="periodicTab" class="periodic-tabs">
             <el-tab-pane label="6.1 月度定期工作" name="monthly" />
@@ -192,6 +192,12 @@
           <el-table :data="currentStation.general[periodicTab]" row-key="id" class="periodic-table" :row-style="periodicRowStyle">
             <el-table-column type="index" label="序号" width="68" align="center" />
             <el-table-column prop="title" label="工作内容" min-width="290" />
+            <el-table-column v-if="periodicTab === 'yearly'" label="上次记录（往年记忆）" min-width="180">
+              <template #default="{ row }">
+                <span v-if="memoryText(row.library_id)" class="memory-text">{{ memoryText(row.library_id) }}</span>
+                <span v-else class="memory-empty">首次开展</span>
+              </template>
+            </el-table-column>
             <el-table-column label="开始时间" width="125"><template #default="{ row }">{{ cnDate(row.plan_start) }}</template></el-table-column>
             <el-table-column label="结束时间" width="125"><template #default="{ row }">{{ cnDate(row.plan_end) }}</template></el-table-column>
             <el-table-column label="完成情况" width="135">
@@ -335,7 +341,7 @@ import { ElMessage, ElMessageBox, ElOption, ElSelect } from 'element-plus'
 import {
   api, downloadFile, cnDate, cnDateTime, COLOR_HEX, ITEM_STATUS_LABEL, PRIORITY_LABEL, REVIEW_LABEL,
   type BatchDetail, type DeviceChangeView, type ExternalAssessmentView, type GeneralItemView,
-  type HandoverItemView, type ImportPreview, type ImportPreviewRow, type SourceRow,
+  type HandoverItemView, type ImportPreview, type ImportPreviewRow, type PeriodicMemory, type SourceRow,
   type Staff, type StationDetail
 } from '@/api'
 
@@ -370,6 +376,8 @@ const itemSections = [
 ]
 const sectionSearch = reactive<Record<'important' | 'handover', string>>({ important: '', handover: '' })
 const periodicTab = ref<'monthly' | 'quarterly' | 'yearly'>('monthly')
+// 6.3 年度定期工作的“上次记录”：library_id → 最近一次填写内容（含往年）
+const periodicMemoryMap = ref<Record<string, PeriodicMemory>>({})
 const currentStation = computed(() => batch.value?.stations.find(row => row.station_meta_id === activeMetaId.value) || batch.value?.stations[0] || null)
 const pendingTotal = computed(() => currentStation.value?.items.filter(row => row.review_status === 'pending').length || 0)
 
@@ -379,9 +387,35 @@ async function load() {
     batch.value = await api.batchDetail(batchId)
     if (!activeMetaId.value || !batch.value.stations.some(row => row.station_meta_id === activeMetaId.value)) activeMetaId.value = batch.value.stations[0]?.station_meta_id || ''
     await loadStaff()
+    loadPeriodicMemory()
   } catch (error) {
     ElMessage.error(friendlyError(error, '交接班加载失败'))
   } finally { loading.value = false }
+}
+
+// 记忆查询是辅助功能：失败只影响提示文字，不阻塞页面。
+async function loadPeriodicMemory() {
+  const ids = new Set<string>()
+  for (const station of batch.value?.stations || []) {
+    for (const row of station.general.yearly) {
+      if (row.library_id) ids.add(row.library_id)
+    }
+  }
+  if (!ids.size) return
+  try {
+    const beforeYear = Number(batch.value?.handover_date?.slice(0, 4)) || undefined
+    const result = await api.periodicMemory([...ids], beforeYear)
+    periodicMemoryMap.value = result.memory
+  } catch { /* 静默忽略，不打扰录入 */ }
+}
+
+function memoryText(libraryId: string): string {
+  const memory = periodicMemoryMap.value[libraryId]
+  if (!memory) return ''
+  const parts = [memory.status_label]
+  if (memory.owner) parts.push(memory.owner)
+  if (memory.note) parts.push(memory.note)
+  return parts.join(' · ')
 }
 async function loadStaff() {
   if (!currentStation.value) return
@@ -728,6 +762,8 @@ onBeforeUnmount(() => {
 .section-toolbar > div { display: flex; gap: 8px; }
 .item-table { border-radius: 11px; overflow: hidden; }
 .item-table :deep(th.el-table__cell), .periodic-table :deep(th.el-table__cell), .preview-table :deep(th.el-table__cell) { color: #617286; background: #f6f9fc; font-size: 12px; }
+.memory-text { color: #2265aa; font-size: 12px; }
+.memory-empty { color: #a0aec0; font-size: 12px; }
 .item-title { display: grid; gap: 4px; }
 .item-title strong { color: #273e57; line-height: 1.55; }
 .item-title small { max-width: 590px; overflow: hidden; color: #76869a; text-overflow: ellipsis; white-space: nowrap; }

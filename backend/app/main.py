@@ -13,7 +13,7 @@ from sqlalchemy import text
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app import config
-from app.api import admin, handovers, imports, session
+from app.api import admin, handovers, imports, reports, session
 from app.audit import audit_requests
 from app.bootstrap import initialize_application_data
 from app.cloud_security import protect_cloud_requests
@@ -71,6 +71,7 @@ app.include_router(session.router)
 app.include_router(admin.router)
 app.include_router(imports.router)
 app.include_router(handovers.router)
+app.include_router(reports.router)
 
 
 @app.on_event("startup")
