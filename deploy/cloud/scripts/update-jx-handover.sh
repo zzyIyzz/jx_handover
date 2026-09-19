@@ -520,6 +520,23 @@ backup_git_state() {
     git diff --cached --binary > "$BACKUP_DIR/git-index.patch"
 }
 
+ensure_local_runtime_ignores() {
+    local exclude_file="$PROJECT/.git/info/exclude"
+    local pattern=""
+    local -a patterns=(
+        "/runtime/"
+        "/runtime-server/"
+        "/backend/runtime/"
+        "/backend/runtime-server/"
+    )
+    touch "$exclude_file"
+    for pattern in "${patterns[@]}"; do
+        if ! grep -Fqx "$pattern" "$exclude_file"; then
+            printf '%s\n' "$pattern" >> "$exclude_file"
+        fi
+    done
+}
+
 handle_local_changes() {
     local changed_file=""
     local -a changed_files=()
@@ -725,6 +742,11 @@ main() {
     fi
 
     cd "$PROJECT"
+
+    # Runtime directories are business data, never source-code changes. Older
+    # checkouts did not ignore the directory-level adoption report, so keep a
+    # local exclude before inspecting the working tree.
+    ensure_local_runtime_ignores
 
     validate_data_disk_mount
     restore_persisted_env_if_needed

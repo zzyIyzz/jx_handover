@@ -381,6 +381,8 @@ class CloudSecurityUnitTest(unittest.TestCase):
         self.assertIn("verify_production_state", update_script)
         self.assertIn("sync_root_tools", update_script)
         self.assertIn("/root/update_jx_handover.sh", update_script)
+        self.assertIn("ensure_local_runtime_ignores", update_script)
+        self.assertIn('"/runtime/"', update_script)
         self.assertEqual(root_update_script, update_script)
         self.assertIn("/data/jx-handover/config/jx-handover.env", restore_ai_script)
         self.assertIn("persist_env_to_data_disk", restore_ai_script)
