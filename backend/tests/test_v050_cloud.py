@@ -423,6 +423,19 @@ class CloudSecurityUnitTest(unittest.TestCase):
         self.assertNotIn("mkfs.", data_disk_script)
         self.assertNotIn("\nmount ", data_disk_script)
 
+        one_click_script = (
+            PROJECT_ROOT
+            / "deploy"
+            / "cloud"
+            / "scripts"
+            / "one-click-v0.5.4.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("/root/update_jx_handover.sh", one_click_script)
+        self.assertIn("/root/prepare-data-disk-v0.5.4.sh", one_click_script)
+        self.assertIn("exec bash /root/update_jx_handover.sh", one_click_script)
+        self.assertNotIn("mkfs.", one_click_script)
+        self.assertNotIn("\nmount ", one_click_script)
+
         cloud_env = (PROJECT_ROOT / "deploy" / "cloud" / ".env.example").read_text(
             encoding="utf-8"
         )

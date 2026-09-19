@@ -10,6 +10,7 @@
 - 云端持久化收敛到 `/dev/vda3` 挂载的 `/data`：systemd 使用 `/data/jx-handover/data`，Docker 宿主机绑定同一路径；升级和部署脚本会拒绝系统盘或错误挂载点。
 - 正式 `.env` 的 root-only 副本同步到 `/data/jx-handover/config`，管理员配置强制为且仅为周智源。
 - 同步维护服务器固定入口 `/root/update_jx_handover.sh` 对应的下划线版本，避免继续执行旧升级逻辑。
+- 新增 `one-click-v0.5.4.sh`，一次完成数据盘迁移、root 脚本安装和正式升级。
 
 - 兼容第三方 XLSX 导出文件中的空 `<fill/>` 样式和空图表 grouping，不修改上传原件。
 - 新增多月份、两行分组表头的早晚班会识别，支持合并日期/场站向下继承和字段映射。
