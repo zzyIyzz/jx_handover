@@ -1,9 +1,38 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+umask 077
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cloud_dir="$(cd -- "${script_dir}/.." && pwd)"
 env_file="${cloud_dir}/.env"
+data_device="${DATA_DEVICE:-/dev/vda3}"
+data_mount="${DATA_MOUNT:-/data}"
+persisted_env="${PERSISTED_ENV_FILE:-/data/jx-handover/config/docker.env}"
+
+read_env_value() {
+  local key="$1"
+  sed -n "s/^${key}=//p" "${env_file}" | tail -n 1 | tr -d '\r' \
+    | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
+}
+
+set_env_value() {
+  local key="$1"
+  local value="$2"
+  local temporary=""
+  temporary="$(mktemp "${env_file}.tmp.XXXXXX")"
+  JX_ENV_REPLACEMENT="${value}" awk -v wanted="${key}" '
+    BEGIN { done=0; replacement=ENVIRON["JX_ENV_REPLACEMENT"] }
+    $0 ~ "^[[:space:]]*" wanted "[[:space:]]*=" {
+      if (!done) print wanted "=" replacement
+      done=1
+      next
+    }
+    { print }
+    END { if (!done) print wanted "=" replacement }
+  ' "${env_file}" > "${temporary}"
+  chmod 600 "${temporary}"
+  mv -f -- "${temporary}" "${env_file}"
+}
 
 if [[ ! -f "${env_file}" ]]; then
   echo "缺少 ${env_file}；请先运行 prepare-host.sh 并完成配置。" >&2
@@ -15,6 +44,16 @@ if ! command -v docker >/dev/null 2>&1; then
 fi
 if ! command -v curl >/dev/null 2>&1; then
   echo "未找到 curl，无法执行健康检查。请先安装 curl。" >&2
+  exit 1
+fi
+for command_name in python3 readlink; do
+  if ! command -v "${command_name}" >/dev/null 2>&1; then
+    echo "未找到 ${command_name}，无法完成安全配置。" >&2
+    exit 1
+  fi
+done
+if ! command -v findmnt >/dev/null 2>&1; then
+  echo "未找到 findmnt，无法确认独立数据盘挂载。" >&2
   exit 1
 fi
 if ! docker compose version >/dev/null 2>&1; then
@@ -34,6 +73,48 @@ if [[ -z "${data_root}" || ! -d "${data_root}" ]]; then
   echo "修改 JX_HOST_DATA_DIR 后，请重新执行 sudo bash deploy/cloud/scripts/prepare-host.sh。" >&2
   exit 1
 fi
+mount_source="$(findmnt -n -o SOURCE --target "${data_mount}" 2>/dev/null || true)"
+mount_target="$(findmnt -n -o TARGET --target "${data_mount}" 2>/dev/null || true)"
+mount_source="${mount_source%%[*}"
+if [[ "${mount_target}" != "${data_mount}" ]] \
+  || [[ "$(readlink -f "${mount_source}" 2>/dev/null || true)" != "$(readlink -f "${data_device}" 2>/dev/null || true)" ]]; then
+  echo "${data_mount} 不是 ${data_device} 的独立挂载点，拒绝启动容器。" >&2
+  exit 1
+fi
+if [[ "${data_root}" != "${data_mount}"/* ]]; then
+  echo "JX_HOST_DATA_DIR 必须位于数据盘 ${data_mount} 下。" >&2
+  exit 1
+fi
+if [[ "${persisted_env}" != "${data_mount}"/* ]]; then
+  echo "JX_CONTAINER_ENV_FILE 必须位于数据盘 ${data_mount} 下。" >&2
+  exit 1
+fi
+legacy_root="/www/jx-handover/data"
+if [[ "${data_root}" != "${legacy_root}" \
+  && -f "${legacy_root}/data/handover.db" \
+  && ! -f "${data_root}/data/handover.db" ]]; then
+  echo "检测到旧业务数据库但数据盘目标为空，拒绝启动新空库。" >&2
+  exit 1
+fi
+
+set_env_value JX_ADMIN_NAMES "周智源"
+set_env_value JX_DEFAULT_ADMIN_NAMES "周智源"
+set_env_value JX_CONTAINER_ENV_FILE "${persisted_env}"
+session_secret="$(read_env_value JX_SESSION_SECRET)"
+if [[ ${#session_secret} -lt 32 || "${session_secret}" == *"请替换"* ]]; then
+  session_secret="$(python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(48))
+PY
+  )"
+  set_env_value JX_SESSION_SECRET "${session_secret}"
+  echo "原会话密钥缺失或无效，已生成随机密钥；现有浏览器需重新登录。"
+fi
+install -d -o root -g root -m 0700 "$(dirname "${persisted_env}")"
+temporary_env="$(mktemp "$(dirname "${persisted_env}")/.docker-env.XXXXXX")"
+cp -- "${env_file}" "${temporary_env}"
+chmod 600 "${temporary_env}"
+mv -f -- "${temporary_env}" "${persisted_env}"
 
 docker compose config --quiet
 

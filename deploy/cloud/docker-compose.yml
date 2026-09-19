@@ -18,7 +18,7 @@ services:
       TZ: Asia/Shanghai
     volumes:
       - type: bind
-        source: ${JX_HOST_DATA_DIR:-/www/jx-handover/data}
+        source: ${JX_HOST_DATA_DIR:-/data/jx-handover/data}
         target: /var/lib/jx-handover
     ports:
       - "127.0.0.1:8765:8765"

@@ -336,9 +336,13 @@ def validate_runtime_configuration() -> None:
     # A public entry point must name its administrators explicitly; the
     # recovery default is only a safety net for LAN and desktop installs.
     if not ADMIN_NAMES:
-        problems.append("JX_ADMIN_NAMES 至少需要配置一名系统管理员。")
+        problems.append("JX_ADMIN_NAMES 必须配置为周智源。")
     elif any(marker in name for name in ADMIN_NAMES for marker in ("请替换", "请填写")):
         problems.append("JX_ADMIN_NAMES 仍是示例占位文字，请填写实际管理员姓名。")
+    elif ADMIN_NAMES != {"周智源"}:
+        problems.append("云端 JX_ADMIN_NAMES 必须且只能为周智源。")
+    if DEFAULT_ADMIN_NAMES != {"周智源"}:
+        problems.append("云端 JX_DEFAULT_ADMIN_NAMES 必须且只能为周智源。")
     if CLOUD_ACCESS_SCOPE != "private":
         problems.append(
             "JX_CLOUD_ACCESS_SCOPE 必须为 private，并在宝塔 Nginx 使用固定 IP 白名单或 VPN。"

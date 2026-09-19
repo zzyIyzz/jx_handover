@@ -45,7 +45,8 @@ class CloudProcessProbe(unittest.TestCase):
             "JX_INITIAL_ACCOUNT_PASSWORD": "aaaa0000*",
             "JX_ACCESS_CODE": "",
             "JX_SESSION_SECRET": "s" * 48,
-            "JX_ADMIN_NAMES": "测试管理员",
+            "JX_ADMIN_NAMES": "周智源",
+            "JX_DEFAULT_ADMIN_NAMES": "周智源",
             "JX_SESSION_TTL_HOURS": "12",
             "AI_MODE": "mock",
         })
@@ -78,8 +79,8 @@ from app.security import hash_password
 initialize_database()
 db = SessionLocal()
 db.add(Staff(
-    station_code="TEST",
-    name="测试管理员",
+    station_code="REGION",
+    name="周智源",
     role="测试角色",
     note="",
     password_hash=hash_password("Cloud-test-password-2026!"),
@@ -93,17 +94,17 @@ with TestClient(app, base_url="https://handover.example.test:1215") as client:
     foreign = client.post(
         "/api/session/login",
         headers={"Origin": "https://lookalike.example.test:1215"},
-        json={"name": "测试管理员", "password": "Cloud-test-password-2026!"},
+        json={"name": "周智源", "password": "Cloud-test-password-2026!"},
     )
     missing_public_port = client.post(
         "/api/session/login",
         headers={"Origin": "https://handover.example.test"},
-        json={"name": "测试管理员", "password": "Cloud-test-password-2026!"},
+        json={"name": "周智源", "password": "Cloud-test-password-2026!"},
     )
     login = client.post(
         "/api/session/login",
         headers={"Origin": "https://handover.example.test:1215"},
-        json={"name": "测试管理员", "password": "Cloud-test-password-2026!"},
+        json={"name": "周智源", "password": "Cloud-test-password-2026!"},
     )
     client.headers['Authorization'] = 'Bearer ' + login.json()['session_token']
     protected = client.get("/api/handovers")
@@ -197,7 +198,7 @@ else:
         self.assertIn("至少需要 32", error)
         self.assertIn("JX_COOKIE_SECURE", error)
         self.assertIn("不能超过 24", error)
-        self.assertIn("至少需要配置一名", error)
+        self.assertIn("必须配置为周智源", error)
         self.assertIn("必须为 private", error)
         self.assertIn("不允许使用通配符", error)
 
@@ -228,6 +229,23 @@ else:
         self.assertIn("示例占位文字，请生成真实随机口令", error)
         self.assertIn("示例占位文字，请生成真实随机密钥", error)
         self.assertIn("示例占位文字，请填写实际管理员", error)
+
+    def test_cloud_administrator_is_locked_to_zhou_zhiyuan(self):
+        script = r'''
+import json
+from app import config
+try:
+    config.validate_runtime_configuration()
+except RuntimeError as exc:
+    print(json.dumps({"error": str(exc)}, ensure_ascii=False))
+else:
+    print(json.dumps({"error": ""}, ensure_ascii=False))
+'''
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self._environment(tmp)
+            env["JX_ADMIN_NAMES"] = "其他人员"
+            error = self._run(script, env)["error"]
+        self.assertIn("必须且只能为周智源", error)
 
     def test_example_or_private_ip_cannot_start_cloud_service(self):
         script = r'''
@@ -328,6 +346,7 @@ class CloudSecurityUnitTest(unittest.TestCase):
         self.assertIn("stat -f -c %T", entrypoint)
         self.assertIn("nfs|nfs4|cifs|smb*|fuse*|9p", entrypoint)
         self.assertIn("os.environ['JX_PUBLIC_URL']", compose)
+        self.assertIn("${JX_HOST_DATA_DIR:-/data/jx-handover/data}", compose)
 
         dockerignore = (PROJECT_ROOT / ".dockerignore").read_text(encoding="utf-8")
         self.assertIn("deploy/cloud/.env", dockerignore)
@@ -342,6 +361,21 @@ class CloudSecurityUnitTest(unittest.TestCase):
         self.assertIn("内部端口 8765 已被其他程序占用", deploy_script)
         self.assertIn("公网端口 1215 已被占用", deploy_script)
         self.assertIn("http://127.0.0.1:8765/api/health", deploy_script)
+        self.assertIn("JX_ADMIN_NAMES", deploy_script)
+        self.assertIn("/data/jx-handover/config/docker.env", deploy_script)
+        self.assertIn("/dev/vda3", deploy_script)
+
+        update_script = (
+            PROJECT_ROOT / "deploy" / "cloud" / "scripts" / "update-jx-handover.sh"
+        ).read_text(encoding="utf-8")
+        restore_ai_script = (
+            PROJECT_ROOT / "deploy" / "cloud" / "scripts" / "restore-ai.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("/data/jx-handover/config/jx-handover.env", update_script)
+        self.assertIn('JX_ADMIN_NAMES "周智源"', update_script)
+        self.assertIn("verify_production_state", update_script)
+        self.assertIn("/data/jx-handover/config/jx-handover.env", restore_ai_script)
+        self.assertIn("persist_env_to_data_disk", restore_ai_script)
 
         prepare_script = (
             PROJECT_ROOT / "deploy" / "cloud" / "scripts" / "prepare-host.sh"
@@ -368,6 +402,31 @@ class CloudSecurityUnitTest(unittest.TestCase):
             / "jx-handover-ip-server.conf.example"
         ).read_text(encoding="utf-8")
         self.assertIn("--ip", prepare_script)
+        self.assertIn("/data/jx-handover/data", prepare_script)
+        self.assertIn("/dev/vda3", prepare_script)
+
+        data_disk_script = (
+            PROJECT_ROOT
+            / "deploy"
+            / "cloud"
+            / "scripts"
+            / "prepare-data-disk-v0.5.4.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("JX_HANDOVER_DATA_DIR", data_disk_script)
+        self.assertIn("JX_ADMIN_NAMES", data_disk_script)
+        self.assertIn("JX_SESSION_SECRET", data_disk_script)
+        self.assertIn("PRAGMA quick_check", data_disk_script)
+        self.assertNotIn("mkfs.", data_disk_script)
+        self.assertNotIn("\nmount ", data_disk_script)
+
+        cloud_env = (PROJECT_ROOT / "deploy" / "cloud" / ".env.example").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("JX_HOST_DATA_DIR=/data/jx-handover/data", cloud_env)
+        self.assertIn(
+            "JX_CONTAINER_ENV_FILE=/data/jx-handover/config/docker.env",
+            cloud_env,
+        )
         self.assertIn(".env.ip.example", prepare_script)
         self.assertIn("--cert-profile shortlived", certificate_script)
         self.assertIn("--install-cronjob", certificate_script)

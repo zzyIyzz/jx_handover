@@ -10,6 +10,10 @@ PROJECT="${PROJECT:-/www/wwwroot/jx_handover}"
 SERVICE="${SERVICE:-jx-handover}"
 PORT="${PORT:-8765}"
 BACKUP_ROOT="${BACKUP_ROOT:-/www/backup/jx_handover}"
+DATA_DEVICE="${DATA_DEVICE:-/dev/vda3}"
+DATA_MOUNT="${DATA_MOUNT:-/data}"
+DATA_ROOT="${DATA_ROOT:-/data/jx-handover/data}"
+PERSISTED_ENV_FILE="${PERSISTED_ENV_FILE:-/data/jx-handover/config/jx-handover.env}"
 VENV="$PROJECT/.venv"
 ENV_FILE="$PROJECT/.env"
 INPUT_KEY="${QWEN_API_KEY:-}"
@@ -57,6 +61,18 @@ set_env_value() {
     chmod --reference="$file" "$temp" 2>/dev/null || chmod 600 "$temp"
     chown --reference="$file" "$temp" 2>/dev/null || true
     mv -f -- "$temp" "$file"
+}
+
+persist_env_to_data_disk() {
+    local config_dir=""
+    local temporary=""
+    config_dir="$(dirname "$PERSISTED_ENV_FILE")"
+    mkdir -p -- "$config_dir"
+    chmod 700 "$config_dir"
+    temporary="$(mktemp "$config_dir/.jx-env.XXXXXX")"
+    cp -- "$ENV_FILE" "$temporary"
+    chmod 600 "$temporary"
+    mv -f -- "$temporary" "$PERSISTED_ENV_FILE"
 }
 
 is_real_key() {
@@ -114,12 +130,24 @@ if [ "${EUID:-$(id -u)}" -ne 0 ]; then
     error "请使用 root 权限执行：sudo bash $0"
     exit 1
 fi
-for command_name in awk find sort readlink curl systemctl; do
+for command_name in awk find sort readlink findmnt curl systemctl; do
     command -v "$command_name" >/dev/null 2>&1 || {
         error "缺少命令：$command_name"
         exit 1
     }
 done
+if [ ! -b "$DATA_DEVICE" ]; then
+    error "找不到数据盘设备：$DATA_DEVICE"
+    exit 1
+fi
+mount_source="$(findmnt -n -o SOURCE --target "$DATA_MOUNT" 2>/dev/null || true)"
+mount_target="$(findmnt -n -o TARGET --target "$DATA_MOUNT" 2>/dev/null || true)"
+mount_source="${mount_source%%[*}"
+if [ "$mount_target" != "$DATA_MOUNT" ] \
+    || [ "$(readlink -f "$mount_source" 2>/dev/null || true)" != "$(readlink -f "$DATA_DEVICE" 2>/dev/null || true)" ]; then
+    error "$DATA_MOUNT 不是 $DATA_DEVICE 的独立挂载点，拒绝修改配置。"
+    exit 1
+fi
 if [ ! -d "$PROJECT" ] || [ ! -f "$PROJECT/backend/app/config.py" ]; then
     error "项目目录无效：$PROJECT"
     exit 1
@@ -142,14 +170,23 @@ PY
     error "无法确认数据恢复状态，未修改配置或重启服务。"
     exit 1
 fi
-if [ ! -f "$ENV_FILE" ]; then
-    if [ ! -f "$PROJECT/.env.example" ]; then
-        error "找不到 .env 和 .env.example"
-        exit 1
-    fi
-    cp -- "$PROJECT/.env.example" "$ENV_FILE"
+if [ ! -f "$ENV_FILE" ] && [ -f "$PERSISTED_ENV_FILE" ]; then
+    cp -a -- "$PERSISTED_ENV_FILE" "$ENV_FILE"
     chmod 600 "$ENV_FILE"
-    warn "原来没有 .env，已从模板创建。"
+    success "已从数据盘恢复正式 .env"
+fi
+if [ ! -f "$ENV_FILE" ]; then
+    error "找不到正式 .env；请先运行 prepare-data-disk-v0.5.4.sh。"
+    exit 1
+fi
+if [ "$(read_env_value "$ENV_FILE" JX_HANDOVER_DATA_DIR 2>/dev/null || true)" != "$DATA_ROOT" ]; then
+    error "正式数据根没有锁定到 $DATA_ROOT。"
+    exit 1
+fi
+if [ "$(read_env_value "$ENV_FILE" JX_ADMIN_NAMES 2>/dev/null || true)" != "周智源" ] \
+    || [ "$(read_env_value "$ENV_FILE" JX_DEFAULT_ADMIN_NAMES 2>/dev/null || true)" != "周智源" ]; then
+    error "管理员配置必须且只能为周智源。"
+    exit 1
 fi
 
 if ! find_existing_key; then
@@ -189,10 +226,12 @@ set_env_value "$ENV_FILE" QWEN_API_KEY "$INPUT_KEY"
 set_env_value "$ENV_FILE" AI_STRUCTURED_MODE "json_schema"
 set_env_value "$ENV_FILE" AI_TIMEOUT_SECONDS "60"
 chmod 600 "$ENV_FILE"
+persist_env_to_data_disk
 
 KEY_HINT="****${INPUT_KEY: -4}"
 unset INPUT_KEY
 success "配置已写入（来源：$KEY_SOURCE；Key：$KEY_HINT）"
+success "正式配置副本已同步到数据盘：$PERSISTED_ENV_FILE"
 echo "修改前配置备份：$BACKUP_DIR/.env.before-ai-restore"
 
 systemctl restart "$SERVICE"

@@ -12,6 +12,10 @@ REPO="${REPO:-https://ghproxy.net/https://github.com/zzyIyzz/jx_handover.git}"
 BRANCH="${BRANCH:-release/v0.5.4}"
 SERVICE="${SERVICE:-jx-handover}"
 PORT="${PORT:-8765}"
+DATA_DEVICE="${DATA_DEVICE:-/dev/vda3}"
+DATA_MOUNT="${DATA_MOUNT:-/data}"
+DATA_ROOT="${DATA_ROOT:-/data/jx-handover/data}"
+PERSISTED_ENV_FILE="${PERSISTED_ENV_FILE:-/data/jx-handover/config/jx-handover.env}"
 
 VENV="$PROJECT/.venv"
 BACKUP_ROOT="${BACKUP_ROOT:-/www/backup/jx_handover}"
@@ -56,6 +60,93 @@ info() {
 success() { echo "[成功] $1"; }
 warn() { echo "[警告] $1"; }
 error() { echo "[错误] $1" >&2; }
+
+validate_data_disk_mount() {
+    local mount_source=""
+    local mount_target=""
+    local source_device=""
+    local expected_device=""
+
+    [ -b "$DATA_DEVICE" ] || {
+        error "找不到数据盘设备：$DATA_DEVICE"
+        return 1
+    }
+    mount_source="$(findmnt -n -o SOURCE --target "$DATA_MOUNT" 2>/dev/null || true)"
+    mount_target="$(findmnt -n -o TARGET --target "$DATA_MOUNT" 2>/dev/null || true)"
+    [ "$mount_target" = "$DATA_MOUNT" ] || {
+        error "$DATA_MOUNT 不是独立挂载点；请先按数据盘文档挂载 $DATA_DEVICE。"
+        return 1
+    }
+    mount_source="${mount_source%%[*}"
+    source_device="$(readlink -f "$mount_source" 2>/dev/null || true)"
+    expected_device="$(readlink -f "$DATA_DEVICE" 2>/dev/null || true)"
+    [ -n "$source_device" ] && [ "$source_device" = "$expected_device" ] || {
+        error "$DATA_MOUNT 当前来源为 ${mount_source:-未知}，不是要求的数据盘 $DATA_DEVICE。"
+        return 1
+    }
+    [ -w "$DATA_MOUNT" ] || {
+        error "数据盘挂载点不可写：$DATA_MOUNT"
+        return 1
+    }
+    success "数据盘已确认：$DATA_DEVICE -> $DATA_MOUNT"
+}
+
+restore_persisted_env_if_needed() {
+    if [ ! -f "$PROJECT/.env" ] && [ -f "$PERSISTED_ENV_FILE" ]; then
+        cp -a -- "$PERSISTED_ENV_FILE" "$PROJECT/.env"
+        chmod 600 "$PROJECT/.env"
+        success "已从数据盘恢复正式 .env 配置"
+    fi
+}
+
+persist_env_to_data_disk() {
+    local config_dir=""
+    local temporary=""
+    config_dir="$(dirname "$PERSISTED_ENV_FILE")"
+    mkdir -p -- "$config_dir"
+    chmod 700 "$config_dir"
+    temporary="$(mktemp "$config_dir/.jx-env.XXXXXX")"
+    cp -- "$PROJECT/.env" "$temporary"
+    chmod 600 "$temporary"
+    mv -f -- "$temporary" "$PERSISTED_ENV_FILE"
+    success "正式 .env 已同步到数据盘：$PERSISTED_ENV_FILE"
+}
+
+enforce_production_identity() {
+    local session_secret=""
+    set_env_value "$PROJECT/.env" JX_HANDOVER_DATA_DIR "$DATA_ROOT"
+    set_env_value "$PROJECT/.env" JX_ADMIN_NAMES "周智源"
+    set_env_value "$PROJECT/.env" JX_DEFAULT_ADMIN_NAMES "周智源"
+
+    session_secret="$(read_env_value "$PROJECT/.env" JX_SESSION_SECRET 2>/dev/null || true)"
+    if [ "${#session_secret}" -lt 32 ] || [[ "$session_secret" == *"请替换"* ]]; then
+        session_secret="$(python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(48))
+PY
+        )"
+        set_env_value "$PROJECT/.env" JX_SESSION_SECRET "$session_secret"
+        warn "原会话密钥缺失或无效，已生成新的随机密钥；现有浏览器需重新登录。"
+    fi
+    chmod 600 "$PROJECT/.env"
+}
+
+validate_production_env() {
+    local configured_root=""
+    local admins=""
+    local default_admins=""
+    configured_root="$(read_env_value "$PROJECT/.env" JX_HANDOVER_DATA_DIR 2>/dev/null || true)"
+    admins="$(read_env_value "$PROJECT/.env" JX_ADMIN_NAMES 2>/dev/null || true)"
+    default_admins="$(read_env_value "$PROJECT/.env" JX_DEFAULT_ADMIN_NAMES 2>/dev/null || true)"
+    [ "$configured_root" = "$DATA_ROOT" ] || {
+        error "正式数据根尚未迁移到 $DATA_ROOT。请先运行 prepare-data-disk-v0.5.4.sh。"
+        return 1
+    }
+    [ "$admins" = "周智源" ] && [ "$default_admins" = "周智源" ] || {
+        error "管理员配置必须且只能为周智源；请先运行数据盘准备脚本。"
+        return 1
+    }
+}
 
 read_env_value() {
     local file="$1"
@@ -271,6 +362,46 @@ print(
     "数据库预检完成："
     f"新账号 {result['created_staff']}，首次初始化密码 {result['initialized_accounts']}"
 )
+PY
+    )
+}
+
+verify_production_state() {
+    (cd "$PROJECT/backend" && JX_EXPECTED_DATA_ROOT="$DATA_ROOT" \
+        "$VENV/bin/python" - <<'PY'
+import os
+from pathlib import Path
+import sqlite3
+
+from app import config
+
+expected = Path(os.environ["JX_EXPECTED_DATA_ROOT"]).resolve()
+if config.USER_DATA_ROOT.resolve() != expected:
+    raise RuntimeError(
+        f"生效数据根错误：{config.USER_DATA_ROOT.resolve()}，期望 {expected}"
+    )
+if config.ADMIN_NAMES != {"周智源"} or config.DEFAULT_ADMIN_NAMES != {"周智源"}:
+    raise RuntimeError("管理员环境配置没有锁定为周智源一人。")
+connection = sqlite3.connect(str(config.DATABASE_PATH), timeout=30)
+try:
+    check = connection.execute("PRAGMA quick_check").fetchone()
+    if not check or str(check[0]).lower() != "ok":
+        raise RuntimeError("正式数据库完整性检查失败。")
+    administrators = [
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM staff WHERE is_admin=1 ORDER BY name"
+        ).fetchall()
+    ]
+finally:
+    connection.close()
+if administrators != ["周智源"]:
+    raise RuntimeError(
+        "数据库管理员不是且仅是周智源：" + "、".join(administrators)
+    )
+print(f"正式数据根：{expected}")
+print("数据库管理员：周智源（唯一）")
+print("数据库完整性：ok")
 PY
     )
 }
@@ -504,7 +635,7 @@ main() {
         return 1
     fi
 
-    local required_commands=(git python3 node npm curl systemctl tar find sort sed readlink)
+    local required_commands=(git python3 node npm curl systemctl tar find sort sed readlink findmnt)
     local cmd=""
     for cmd in "${required_commands[@]}"; do
         if ! command -v "$cmd" >/dev/null 2>&1; then
@@ -553,6 +684,14 @@ main() {
     fi
 
     cd "$PROJECT"
+
+    validate_data_disk_mount
+    restore_persisted_env_if_needed
+    if [ ! -f "$PROJECT/.env" ]; then
+        error "缺少正式 .env；请先运行 prepare-data-disk-v0.5.4.sh 完成数据盘初始化。"
+        return 1
+    fi
+    validate_production_env
 
     # 3. Git 检查
     # Check before deployment so even rollback cannot trigger a pending restore.
@@ -743,8 +882,10 @@ PY
     fi
 
     set_env_value "$PROJECT/.env" JX_HANDOVER_MODE server
+    enforce_production_identity
     configure_ai
-    success ".env 已保留，并确保 JX_HANDOVER_MODE=server、AI_MODE=auto"
+    persist_env_to_data_disk
+    success ".env 已保留，数据根和管理员已锁定，AI_MODE=auto"
 
     # 7. Python
     info "7/10 更新 Python 后端"
@@ -766,6 +907,7 @@ PY
 
     run_database_preflight
     verify_account_credentials
+    verify_production_state
     success "数据库迁移与账号密码连续性检查通过"
 
     cat > "$SERVICE_FILE" <<EOF
