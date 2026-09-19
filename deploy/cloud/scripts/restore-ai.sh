@@ -175,12 +175,25 @@ if [ ! -x "$VENV/bin/python" ]; then
 fi
 # Refuse to trigger a pending database restore as a side effect of AI recovery.
 if ! (cd "$PROJECT/backend" && "$VENV/bin/python" - <<'PY'
+from pathlib import Path
+
 from app import config
+from app.services.data_root import adoption_plan
+
 markers = [config.SNAPSHOT_DIR / "restore" / "pending.json"]
-markers += [config.SOURCE_BASE / name / "snapshots" / "restore" / "pending.json"
-            for name in ("runtime", "runtime-server")]
-if any(marker.exists() or marker.with_name("applying.json").exists() for marker in markers):
+plan = adoption_plan()
+if plan.get("state") == "adopt" and plan.get("source"):
+    source = Path(str(plan["source"]))
+    markers.append(source / "snapshots" / "restore" / "pending.json")
+blocked = [
+    marker
+    for marker in markers
+    if marker.exists() or marker.with_name("applying.json").exists()
+]
+if blocked:
     print("[错误] 存在待执行或未完成的数据恢复；请先按恢复验收文档核实，不能直接重启服务。")
+    for marker in blocked:
+        print(f"[错误] 恢复标记目录：{marker.parent}")
     raise SystemExit(1)
 PY
 ); then
