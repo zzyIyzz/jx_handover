@@ -434,6 +434,8 @@ sync_root_tools() {
         "prepare-data-disk-v0.5.4.sh:/root/prepare-data-disk-v0.5.4.sh"
         "restore-ai.sh:/root/restore-ai.sh"
         "one-click-v0.5.4.sh:/root/one-click-v0.5.4.sh"
+        "data-restore.sh:/root/data-restore.sh"
+        "数据恢复.sh:/root/数据恢复.sh"
     )
     for mapping in "${mappings[@]}"; do
         source="$scripts_dir/${mapping%%:*}"

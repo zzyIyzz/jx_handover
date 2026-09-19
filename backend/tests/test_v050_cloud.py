@@ -441,8 +441,21 @@ class CloudSecurityUnitTest(unittest.TestCase):
         self.assertIn("/root/update_jx_handover.sh", one_click_script)
         self.assertIn("/root/prepare-data-disk-v0.5.4.sh", one_click_script)
         self.assertIn("exec bash /root/update_jx_handover.sh", one_click_script)
+        self.assertIn("/root/data-restore.sh", one_click_script)
+        self.assertIn("/root/数据恢复.sh", one_click_script)
         self.assertNotIn("mkfs.", one_click_script)
         self.assertNotIn("\nmount ", one_click_script)
+
+        data_restore_script = (
+            PROJECT_ROOT / "deploy" / "cloud" / "scripts" / "data-restore.sh"
+        ).read_text(encoding="utf-8")
+        data_restore_cn_script = (
+            PROJECT_ROOT / "deploy" / "cloud" / "scripts" / "数据恢复.sh"
+        ).read_text(encoding="utf-8")
+        self.assertIn("verify_full_backup", data_restore_script)
+        self.assertIn("CONFIRM_RESTORE", data_restore_script)
+        self.assertIn("PRAGMA quick_check", data_restore_script)
+        self.assertIn("data-restore.sh", data_restore_cn_script)
 
         cloud_env = (PROJECT_ROOT / "deploy" / "cloud" / ".env.example").read_text(
             encoding="utf-8"

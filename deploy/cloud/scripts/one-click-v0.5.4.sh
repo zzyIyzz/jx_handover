@@ -7,12 +7,15 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 prepare_script="$script_dir/prepare-data-disk-v0.5.4.sh"
 update_script="$script_dir/update_jx_handover.sh"
 restore_ai_script="$script_dir/restore-ai.sh"
+data_restore_script="$script_dir/data-restore.sh"
+data_restore_cn_script="$script_dir/数据恢复.sh"
 
 if [ "${EUID:-$(id -u)}" -ne 0 ]; then
     echo "[错误] 请使用 root 权限执行：sudo bash $0" >&2
     exit 1
 fi
-for required in "$prepare_script" "$update_script" "$restore_ai_script"; do
+for required in "$prepare_script" "$update_script" "$restore_ai_script" \
+    "$data_restore_script" "$data_restore_cn_script"; do
     if [ ! -f "$required" ]; then
         echo "[错误] 一键升级目录不完整，缺少：$required" >&2
         exit 1
@@ -32,6 +35,10 @@ install -o root -g root -m 700 \
     "$update_script" /root/update_jx_handover.sh
 install -o root -g root -m 700 \
     "$restore_ai_script" /root/restore-ai.sh
+install -o root -g root -m 700 \
+    "$data_restore_script" /root/data-restore.sh
+install -o root -g root -m 700 \
+    "$data_restore_cn_script" /root/数据恢复.sh
 
 echo "[1/2] 准备独立数据盘并迁移现有业务数据"
 bash /root/prepare-data-disk-v0.5.4.sh
