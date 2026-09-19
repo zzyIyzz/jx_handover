@@ -16,6 +16,7 @@ DATA_DEVICE="${DATA_DEVICE:-}"
 DATA_MOUNT="${DATA_MOUNT:-/data}"
 DATA_ROOT="${DATA_ROOT:-/data/jx-handover/data}"
 PERSISTED_ENV_FILE="${PERSISTED_ENV_FILE:-/data/jx-handover/config/jx-handover.env}"
+ALLOW_SYSTEM_DISK="${ALLOW_SYSTEM_DISK:-1}"
 
 VENV="$PROJECT/.venv"
 BACKUP_ROOT="${BACKUP_ROOT:-/www/backup/jx_handover}"
@@ -69,12 +70,9 @@ validate_data_disk_mount() {
     local root_source=""
     local root_device=""
 
+    mkdir -p -- "$DATA_MOUNT"
     mount_source="$(findmnt -n -o SOURCE --target "$DATA_MOUNT" 2>/dev/null || true)"
     mount_target="$(findmnt -n -o TARGET --target "$DATA_MOUNT" 2>/dev/null || true)"
-    [ "$mount_target" = "$DATA_MOUNT" ] || {
-        error "$DATA_MOUNT 不是独立挂载点；请先按数据盘文档挂载 $DATA_DEVICE。"
-        return 1
-    }
     mount_source="${mount_source%%[*}"
     source_device="$(readlink -f "$mount_source" 2>/dev/null || true)"
     [ -n "$source_device" ] && [ -b "$source_device" ] || {
@@ -84,10 +82,18 @@ validate_data_disk_mount() {
     root_source="$(findmnt -n -o SOURCE --target / 2>/dev/null || true)"
     root_source="${root_source%%[*}"
     root_device="$(readlink -f "$root_source" 2>/dev/null || true)"
-    [ "$source_device" != "$root_device" ] || {
-        error "$DATA_MOUNT 与系统根目录 / 使用同一设备 $source_device，不是独立数据盘。"
-        return 1
-    }
+    if [ "$source_device" = "$root_device" ]; then
+        [ "$ALLOW_SYSTEM_DISK" = "1" ] || {
+            error "$DATA_MOUNT 使用系统根分区；当前配置要求独立数据盘。"
+            return 1
+        }
+        warn "当前使用系统盘持久化：$DATA_ROOT；请确保 OSS 异地备份正常。"
+    else
+        [ "$mount_target" = "$DATA_MOUNT" ] || {
+            error "$DATA_MOUNT 位于其他挂载层级，无法确认独立数据盘边界。"
+            return 1
+        }
+    fi
     if [ -n "$DATA_DEVICE" ]; then
         expected_device="$(readlink -f "$DATA_DEVICE" 2>/dev/null || true)"
         [ "$source_device" = "$expected_device" ] || {
@@ -101,7 +107,7 @@ validate_data_disk_mount() {
         error "数据盘挂载点不可写：$DATA_MOUNT"
         return 1
     }
-    success "独立数据盘已确认：$DATA_DEVICE -> $DATA_MOUNT"
+    success "持久化存储已确认：$DATA_DEVICE -> $DATA_MOUNT"
 }
 
 restore_persisted_env_if_needed() {

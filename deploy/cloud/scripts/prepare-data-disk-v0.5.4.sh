@@ -11,6 +11,7 @@ DATA_DEVICE="${DATA_DEVICE:-}"
 DATA_MOUNT="${DATA_MOUNT:-/data}"
 DATA_ROOT="${DATA_ROOT:-/data/jx-handover/data}"
 PERSISTED_ENV_FILE="${PERSISTED_ENV_FILE:-/data/jx-handover/config/jx-handover.env}"
+ALLOW_SYSTEM_DISK="${ALLOW_SYSTEM_DISK:-1}"
 VENV="$PROJECT/.venv"
 ENV_FILE="$PROJECT/.env"
 
@@ -68,12 +69,9 @@ validate_mount() {
     local expected_device=""
     local root_source=""
     local root_device=""
+    mkdir -p -- "$DATA_MOUNT"
     mount_source="$(findmnt -n -o SOURCE --target "$DATA_MOUNT" 2>/dev/null || true)"
     mount_target="$(findmnt -n -o TARGET --target "$DATA_MOUNT" 2>/dev/null || true)"
-    [ "$mount_target" = "$DATA_MOUNT" ] || {
-        error "$DATA_MOUNT 不是独立挂载点。请先人工确认并挂载 $DATA_DEVICE。"
-        return 1
-    }
     mount_source="${mount_source%%[*}"
     actual_device="$(readlink -f "$mount_source" 2>/dev/null || true)"
     [ -n "$actual_device" ] && [ -b "$actual_device" ] || {
@@ -83,10 +81,18 @@ validate_mount() {
     root_source="$(findmnt -n -o SOURCE --target / 2>/dev/null || true)"
     root_source="${root_source%%[*}"
     root_device="$(readlink -f "$root_source" 2>/dev/null || true)"
-    [ "$actual_device" != "$root_device" ] || {
-        error "$DATA_MOUNT 与系统根目录 / 使用同一设备 $actual_device。"
-        return 1
-    }
+    if [ "$actual_device" = "$root_device" ]; then
+        [ "$ALLOW_SYSTEM_DISK" = "1" ] || {
+            error "$DATA_MOUNT 使用系统根分区；当前配置要求独立数据盘。"
+            return 1
+        }
+        warn "将使用系统盘目录 $DATA_ROOT；系统盘故障时需依赖 OSS/外部备份恢复。"
+    else
+        [ "$mount_target" = "$DATA_MOUNT" ] || {
+            error "$DATA_MOUNT 位于其他挂载层级，无法确认数据盘边界。"
+            return 1
+        }
+    fi
     if [ -n "$DATA_DEVICE" ]; then
         expected_device="$(readlink -f "$DATA_DEVICE" 2>/dev/null || true)"
         [ "$actual_device" = "$expected_device" ] || {

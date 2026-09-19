@@ -364,7 +364,8 @@ class CloudSecurityUnitTest(unittest.TestCase):
         self.assertIn("JX_ADMIN_NAMES", deploy_script)
         self.assertIn("/data/jx-handover/config/docker.env", deploy_script)
         self.assertIn("--target /", deploy_script)
-        self.assertIn("不是与系统根分区不同的独立数据盘", deploy_script)
+        self.assertIn("ALLOW_SYSTEM_DISK", deploy_script)
+        self.assertIn("当前使用系统盘持久化", deploy_script)
 
         update_script = (
             PROJECT_ROOT / "deploy" / "cloud" / "scripts" / "update-jx-handover.sh"
@@ -411,7 +412,8 @@ class CloudSecurityUnitTest(unittest.TestCase):
         self.assertIn("--ip", prepare_script)
         self.assertIn("/data/jx-handover/data", prepare_script)
         self.assertIn("--target /", prepare_script)
-        self.assertIn("与系统根分区不同", prepare_script)
+        self.assertIn("ALLOW_SYSTEM_DISK", prepare_script)
+        self.assertIn("当前使用系统盘持久化", prepare_script)
 
         data_disk_script = (
             PROJECT_ROOT

@@ -8,6 +8,7 @@ env_file="${cloud_dir}/.env"
 data_device="${DATA_DEVICE:-}"
 data_mount="${DATA_MOUNT:-/data}"
 persisted_env="${PERSISTED_ENV_FILE:-/data/jx-handover/config/docker.env}"
+allow_system_disk="${ALLOW_SYSTEM_DISK:-1}"
 
 read_env_value() {
   local key="$1"
@@ -73,6 +74,7 @@ if [[ -z "${data_root}" || ! -d "${data_root}" ]]; then
   echo "修改 JX_HOST_DATA_DIR 后，请重新执行 sudo bash deploy/cloud/scripts/prepare-host.sh。" >&2
   exit 1
 fi
+mkdir -p -- "${data_mount}"
 mount_source="$(findmnt -n -o SOURCE --target "${data_mount}" 2>/dev/null || true)"
 mount_target="$(findmnt -n -o TARGET --target "${data_mount}" 2>/dev/null || true)"
 mount_source="${mount_source%%[*}"
@@ -80,9 +82,18 @@ source_device="$(readlink -f "${mount_source}" 2>/dev/null || true)"
 root_source="$(findmnt -n -o SOURCE --target / 2>/dev/null || true)"
 root_source="${root_source%%[*}"
 root_device="$(readlink -f "${root_source}" 2>/dev/null || true)"
-if [[ "${mount_target}" != "${data_mount}" ]] \
-  || [[ -z "${source_device}" || ! -b "${source_device}" || "${source_device}" == "${root_device}" ]]; then
-  echo "${data_mount} 不是与系统根分区不同的独立数据盘挂载点，拒绝启动容器。" >&2
+if [[ -z "${source_device}" || ! -b "${source_device}" ]]; then
+  echo "无法识别 ${data_mount} 对应的持久化设备。" >&2
+  exit 1
+fi
+if [[ "${source_device}" == "${root_device}" ]]; then
+  if [[ "${allow_system_disk}" != "1" ]]; then
+    echo "${data_mount} 使用系统根分区；当前配置要求独立数据盘。" >&2
+    exit 1
+  fi
+  echo "提示：当前使用系统盘持久化，请确保 OSS 异地备份正常。"
+elif [[ "${mount_target}" != "${data_mount}" ]]; then
+  echo "${data_mount} 位于其他挂载层级，无法确认数据盘边界。" >&2
   exit 1
 fi
 if [[ -n "${data_device}" \

@@ -14,6 +14,7 @@ DATA_DEVICE="${DATA_DEVICE:-}"
 DATA_MOUNT="${DATA_MOUNT:-/data}"
 DATA_ROOT="${DATA_ROOT:-/data/jx-handover/data}"
 PERSISTED_ENV_FILE="${PERSISTED_ENV_FILE:-/data/jx-handover/config/jx-handover.env}"
+ALLOW_SYSTEM_DISK="${ALLOW_SYSTEM_DISK:-1}"
 VENV="$PROJECT/.venv"
 ENV_FILE="$PROJECT/.env"
 INPUT_KEY="${QWEN_API_KEY:-}"
@@ -136,6 +137,7 @@ for command_name in awk find sort readlink findmnt curl systemctl; do
         exit 1
     }
 done
+mkdir -p -- "$DATA_MOUNT"
 mount_source="$(findmnt -n -o SOURCE --target "$DATA_MOUNT" 2>/dev/null || true)"
 mount_target="$(findmnt -n -o TARGET --target "$DATA_MOUNT" 2>/dev/null || true)"
 mount_source="${mount_source%%[*}"
@@ -143,10 +145,18 @@ source_device="$(readlink -f "$mount_source" 2>/dev/null || true)"
 root_source="$(findmnt -n -o SOURCE --target / 2>/dev/null || true)"
 root_source="${root_source%%[*}"
 root_device="$(readlink -f "$root_source" 2>/dev/null || true)"
-if [ "$mount_target" != "$DATA_MOUNT" ] \
-    || [ -z "$source_device" ] || [ ! -b "$source_device" ] \
-    || [ "$source_device" = "$root_device" ]; then
-    error "$DATA_MOUNT 不是独立数据盘挂载点，拒绝修改配置。"
+if [ -z "$source_device" ] || [ ! -b "$source_device" ]; then
+    error "无法识别 $DATA_MOUNT 对应的持久化设备。"
+    exit 1
+fi
+if [ "$source_device" = "$root_device" ]; then
+    if [ "$ALLOW_SYSTEM_DISK" != "1" ]; then
+        error "$DATA_MOUNT 使用系统根分区；当前配置要求独立数据盘。"
+        exit 1
+    fi
+    warn "当前使用系统盘持久化；请确保 OSS 异地备份正常。"
+elif [ "$mount_target" != "$DATA_MOUNT" ]; then
+    error "$DATA_MOUNT 位于其他挂载层级，无法确认数据盘边界。"
     exit 1
 fi
 if [ -n "$DATA_DEVICE" ] \
