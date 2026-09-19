@@ -40,6 +40,7 @@ SERVICE_STOPPED_FOR_BACKUP=0
 AI_KEY_INPUT="${QWEN_API_KEY:-}"
 AI_KEY_SOURCE=""
 AI_KEY_HINT=""
+ACCOUNT_SNAPSHOT_FILE=""
 
 # Do not leave the secret exported to child commands.  It is written only to
 # the root-readable .env file after the backup has been created.
@@ -161,6 +162,117 @@ configure_ai() {
         warn "已将 AI_MODE 从 ${old_mode:-未配置} 调整为 auto，但没有找到真实 QWEN_API_KEY。"
         warn "本次升级会继续完成；随后请运行同目录的 restore-ai.sh 安全填写 Key。"
     fi
+}
+
+snapshot_account_credentials() {
+    ACCOUNT_SNAPSHOT_FILE="$BACKUP_DIR/account-credentials-before.json"
+    local result=""
+    result="$(cd "$PROJECT/backend" && \
+        JX_ACCOUNT_SNAPSHOT_FILE="$ACCOUNT_SNAPSHOT_FILE" \
+        "$VENV/bin/python" - <<'PY'
+import json
+import os
+from pathlib import Path
+import sqlite3
+
+from app import config
+
+target = Path(os.environ["JX_ACCOUNT_SNAPSHOT_FILE"])
+payload = {
+    "database_path": str(config.DATABASE_PATH.resolve()),
+    "supported": False,
+    "accounts": [],
+}
+if config.DATABASE_PATH.is_file():
+    connection = sqlite3.connect(str(config.DATABASE_PATH), timeout=30)
+    try:
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='staff'"
+        ).fetchone()
+        if table:
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(staff)")
+            }
+            required = {
+                "id", "name", "password_hash", "must_change_password",
+                "password_updated_at",
+            }
+            if required.issubset(columns):
+                payload["supported"] = True
+                rows = connection.execute(
+                    "SELECT id, name, password_hash, must_change_password, "
+                    "password_updated_at FROM staff "
+                    "WHERE COALESCE(password_hash, '') <> '' ORDER BY id"
+                ).fetchall()
+                payload["accounts"] = [
+                    {
+                        "id": str(row[0]), "name": str(row[1] or ""),
+                        "password_hash": str(row[2] or ""),
+                        "must_change_password": int(row[3] or 0),
+                        "password_updated_at": row[4],
+                    }
+                    for row in rows
+                ]
+    finally:
+        connection.close()
+with target.open("w", encoding="utf-8") as stream:
+    json.dump(payload, stream, ensure_ascii=False, indent=2)
+    stream.flush()
+    os.fsync(stream.fileno())
+os.chmod(target, 0o600)
+print(json.dumps({
+    "supported": payload["supported"],
+    "accounts": len(payload["accounts"]),
+}, ensure_ascii=False))
+PY
+    )" || {
+        error "无法生成账号密码连续性快照，拒绝继续更新。"
+        return 1
+    }
+    chmod 600 "$ACCOUNT_SNAPSHOT_FILE"
+    echo "账号密码快照：$result"
+    success "已有账号密码状态已保存（仅含密码哈希，不含明文密码）"
+}
+
+verify_account_credentials() {
+    [ -n "$ACCOUNT_SNAPSHOT_FILE" ] && [ -f "$ACCOUNT_SNAPSHOT_FILE" ] || return 0
+    local result=""
+    result="$(cd "$PROJECT" && "$VENV/bin/python" \
+        backend/scripts/account_continuity.py verify \
+        --snapshot "$ACCOUNT_SNAPSHOT_FILE")" || {
+        error "账号密码连续性检查失败，备份位置：$BACKUP_DIR"
+        return 1
+    }
+    echo "账号密码核对：$result"
+    if grep -Eq '"supported"[[:space:]]*:[[:space:]]*false' <<<"$result"; then
+        warn "旧数据库此前没有密码字段，已有人员已按首次账号迁移规则初始化。"
+    elif grep -Eq '"restored"[[:space:]]*:[[:space:]]*0' <<<"$result"; then
+        success "升级前已有账号及密码保持不变"
+    else
+        warn "检测到密码字段异常变化，已从升级前快照恢复；请检查服务日志。"
+    fi
+}
+
+run_database_preflight() {
+    (cd "$PROJECT/backend" && "$VENV/bin/python" - <<'PY'
+from app import config
+from app.bootstrap import initialize_application_data
+from app.services.backup import apply_pending_restore
+from app.services.data_root import adopt_legacy_data_root
+
+config.validate_runtime_configuration()
+if apply_pending_restore():
+    raise RuntimeError("升级期间不应执行数据恢复任务。")
+adoption = adopt_legacy_data_root()
+if adoption.get("state") in {"ambiguous", "failed"}:
+    raise RuntimeError(adoption.get("message") or "数据目录接管失败。")
+result = initialize_application_data()
+print(
+    "数据库预检完成："
+    f"新账号 {result['created_staff']}，首次初始化密码 {result['initialized_accounts']}"
+)
+PY
+    )
 }
 
 cleanup_temp() {
@@ -533,6 +645,12 @@ PY
         return 1
     fi
 
+    if [ -x "$VENV/bin/python" ]; then
+        snapshot_account_credentials
+    else
+        warn "首次部署尚无虚拟环境和既有账号，跳过账号密码快照。"
+    fi
+
     local data_name=""
     for data_name in runtime runtime-server; do
         if [ -d "$PROJECT/$data_name" ]; then
@@ -645,6 +763,10 @@ PY
 
     # 9. systemd
     info "9/10 配置并重启后台服务"
+
+    run_database_preflight
+    verify_account_credentials
+    success "数据库迁移与账号密码连续性检查通过"
 
     cat > "$SERVICE_FILE" <<EOF
 [Unit]

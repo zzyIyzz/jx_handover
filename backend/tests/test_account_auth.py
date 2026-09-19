@@ -478,6 +478,44 @@ class AccountAuthTest(unittest.TestCase):
         finally:
             db.close()
 
+    def test_repeated_startup_initialization_preserves_existing_passwords(self):
+        db = self.Session()
+        try:
+            administrator = db.get(Staff, self.admin_id)
+            administrator.password_hash = hash_password(ADMIN_PASSWORD)
+            administrator.must_change_password = 0
+            administrator.password_updated_at = "2026-09-19T08:30:00+08:00"
+            administrator.session_version = 7
+            db.commit()
+
+            original = {
+                "password_hash": administrator.password_hash,
+                "must_change_password": administrator.must_change_password,
+                "password_updated_at": administrator.password_updated_at,
+                "session_version": administrator.session_version,
+            }
+            with mock.patch.multiple(config, **self.settings):
+                self.assertEqual(initialize_missing_staff_passwords(db), 0)
+                self.assertEqual(initialize_missing_staff_passwords(db), 0)
+
+            db.refresh(administrator)
+            self.assertEqual(administrator.password_hash, original["password_hash"])
+            self.assertEqual(
+                administrator.must_change_password,
+                original["must_change_password"],
+            )
+            self.assertEqual(
+                administrator.password_updated_at,
+                original["password_updated_at"],
+            )
+            self.assertEqual(administrator.session_version, original["session_version"])
+            self.assertTrue(verify_password(ADMIN_PASSWORD, administrator.password_hash))
+            self.assertFalse(
+                verify_password(INITIAL_PASSWORD, administrator.password_hash)
+            )
+        finally:
+            db.close()
+
     def test_local_console_can_recover_the_only_admin_account(self):
         with mock.patch.multiple(config, **self.settings), mock.patch(
             "scripts.reset_staff_password.SessionLocal", self.Session
