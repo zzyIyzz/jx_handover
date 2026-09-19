@@ -10,7 +10,7 @@ PROJECT="${PROJECT:-/www/wwwroot/jx_handover}"
 SERVICE="${SERVICE:-jx-handover}"
 PORT="${PORT:-8765}"
 BACKUP_ROOT="${BACKUP_ROOT:-/www/backup/jx_handover}"
-DATA_DEVICE="${DATA_DEVICE:-/dev/vda3}"
+DATA_DEVICE="${DATA_DEVICE:-}"
 DATA_MOUNT="${DATA_MOUNT:-/data}"
 DATA_ROOT="${DATA_ROOT:-/data/jx-handover/data}"
 PERSISTED_ENV_FILE="${PERSISTED_ENV_FILE:-/data/jx-handover/config/jx-handover.env}"
@@ -136,18 +136,25 @@ for command_name in awk find sort readlink findmnt curl systemctl; do
         exit 1
     }
 done
-if [ ! -b "$DATA_DEVICE" ]; then
-    error "找不到数据盘设备：$DATA_DEVICE"
-    exit 1
-fi
 mount_source="$(findmnt -n -o SOURCE --target "$DATA_MOUNT" 2>/dev/null || true)"
 mount_target="$(findmnt -n -o TARGET --target "$DATA_MOUNT" 2>/dev/null || true)"
 mount_source="${mount_source%%[*}"
+source_device="$(readlink -f "$mount_source" 2>/dev/null || true)"
+root_source="$(findmnt -n -o SOURCE --target / 2>/dev/null || true)"
+root_source="${root_source%%[*}"
+root_device="$(readlink -f "$root_source" 2>/dev/null || true)"
 if [ "$mount_target" != "$DATA_MOUNT" ] \
-    || [ "$(readlink -f "$mount_source" 2>/dev/null || true)" != "$(readlink -f "$DATA_DEVICE" 2>/dev/null || true)" ]; then
-    error "$DATA_MOUNT 不是 $DATA_DEVICE 的独立挂载点，拒绝修改配置。"
+    || [ -z "$source_device" ] || [ ! -b "$source_device" ] \
+    || [ "$source_device" = "$root_device" ]; then
+    error "$DATA_MOUNT 不是独立数据盘挂载点，拒绝修改配置。"
     exit 1
 fi
+if [ -n "$DATA_DEVICE" ] \
+    && [ "$source_device" != "$(readlink -f "$DATA_DEVICE" 2>/dev/null || true)" ]; then
+    error "$DATA_MOUNT 当前来源为 $source_device，不是指定设备 $DATA_DEVICE。"
+    exit 1
+fi
+DATA_DEVICE="$source_device"
 if [ ! -d "$PROJECT" ] || [ ! -f "$PROJECT/backend/app/config.py" ]; then
     error "项目目录无效：$PROJECT"
     exit 1

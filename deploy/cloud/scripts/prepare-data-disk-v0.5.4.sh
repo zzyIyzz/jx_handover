@@ -7,7 +7,7 @@ umask 077
 PROJECT="${PROJECT:-/www/wwwroot/jx_handover}"
 SERVICE="${SERVICE:-jx-handover}"
 PORT="${PORT:-8765}"
-DATA_DEVICE="${DATA_DEVICE:-/dev/vda3}"
+DATA_DEVICE="${DATA_DEVICE:-}"
 DATA_MOUNT="${DATA_MOUNT:-/data}"
 DATA_ROOT="${DATA_ROOT:-/data/jx-handover/data}"
 PERSISTED_ENV_FILE="${PERSISTED_ENV_FILE:-/data/jx-handover/config/jx-handover.env}"
@@ -66,10 +66,8 @@ validate_mount() {
     local mount_target=""
     local actual_device=""
     local expected_device=""
-    [ -b "$DATA_DEVICE" ] || {
-        error "找不到块设备：$DATA_DEVICE"
-        return 1
-    }
+    local root_source=""
+    local root_device=""
     mount_source="$(findmnt -n -o SOURCE --target "$DATA_MOUNT" 2>/dev/null || true)"
     mount_target="$(findmnt -n -o TARGET --target "$DATA_MOUNT" 2>/dev/null || true)"
     [ "$mount_target" = "$DATA_MOUNT" ] || {
@@ -78,11 +76,26 @@ validate_mount() {
     }
     mount_source="${mount_source%%[*}"
     actual_device="$(readlink -f "$mount_source" 2>/dev/null || true)"
-    expected_device="$(readlink -f "$DATA_DEVICE" 2>/dev/null || true)"
-    [ -n "$actual_device" ] && [ "$actual_device" = "$expected_device" ] || {
-        error "$DATA_MOUNT 来源为 ${mount_source:-未知}，不是 $DATA_DEVICE。"
+    [ -n "$actual_device" ] && [ -b "$actual_device" ] || {
+        error "无法识别 $DATA_MOUNT 对应的块设备。"
         return 1
     }
+    root_source="$(findmnt -n -o SOURCE --target / 2>/dev/null || true)"
+    root_source="${root_source%%[*}"
+    root_device="$(readlink -f "$root_source" 2>/dev/null || true)"
+    [ "$actual_device" != "$root_device" ] || {
+        error "$DATA_MOUNT 与系统根目录 / 使用同一设备 $actual_device。"
+        return 1
+    }
+    if [ -n "$DATA_DEVICE" ]; then
+        expected_device="$(readlink -f "$DATA_DEVICE" 2>/dev/null || true)"
+        [ "$actual_device" = "$expected_device" ] || {
+            error "$DATA_MOUNT 来源为 $actual_device，不是指定设备 $DATA_DEVICE。"
+            return 1
+        }
+    else
+        DATA_DEVICE="$actual_device"
+    fi
     [ -w "$DATA_MOUNT" ] || {
         error "挂载点不可写：$DATA_MOUNT"
         return 1

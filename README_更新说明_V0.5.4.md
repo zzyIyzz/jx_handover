@@ -14,13 +14,13 @@
 ## 保留的生产约束
 
 - 管理员必须且只能为周智源：`JX_ADMIN_NAMES=周智源`、`JX_DEFAULT_ADMIN_NAMES=周智源`。
-- systemd 与 Docker 正式数据均位于 `/dev/vda3` 挂载的 `/data/jx-handover/data`。
+- systemd 与 Docker 正式数据均位于独立 ESSD 挂载的 `/data/jx-handover/data`；设备名由脚本自动识别。
 - 账号、Argon2id 密码哈希、交接班记录、Word、导入原件、备份和 root-only 配置副本均受升级脚本保护。
 - 数据恢复失败、中断或回滚失败时保持关闭并保留恢复现场。
 
 ## 云服务器升级
 
-管理员先确认 `/dev/vda3` 已挂载到 `/data`，将完整的 `升级脚本_V0.5.4` 文件夹上传服务器后执行：
+管理员先确认新购或新挂载的独立 ESSD 已挂载到 `/data`，将完整的 `升级脚本_V0.5.4` 文件夹上传服务器后执行：
 
 ```bash
 sudo bash one-click-v0.5.4.sh

@@ -363,7 +363,8 @@ class CloudSecurityUnitTest(unittest.TestCase):
         self.assertIn("http://127.0.0.1:8765/api/health", deploy_script)
         self.assertIn("JX_ADMIN_NAMES", deploy_script)
         self.assertIn("/data/jx-handover/config/docker.env", deploy_script)
-        self.assertIn("/dev/vda3", deploy_script)
+        self.assertIn("--target /", deploy_script)
+        self.assertIn("不是与系统根分区不同的独立数据盘", deploy_script)
 
         update_script = (
             PROJECT_ROOT / "deploy" / "cloud" / "scripts" / "update-jx-handover.sh"
@@ -409,7 +410,8 @@ class CloudSecurityUnitTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("--ip", prepare_script)
         self.assertIn("/data/jx-handover/data", prepare_script)
-        self.assertIn("/dev/vda3", prepare_script)
+        self.assertIn("--target /", prepare_script)
+        self.assertIn("与系统根分区不同", prepare_script)
 
         data_disk_script = (
             PROJECT_ROOT

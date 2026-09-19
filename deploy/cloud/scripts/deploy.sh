@@ -5,7 +5,7 @@ umask 077
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cloud_dir="$(cd -- "${script_dir}/.." && pwd)"
 env_file="${cloud_dir}/.env"
-data_device="${DATA_DEVICE:-/dev/vda3}"
+data_device="${DATA_DEVICE:-}"
 data_mount="${DATA_MOUNT:-/data}"
 persisted_env="${PERSISTED_ENV_FILE:-/data/jx-handover/config/docker.env}"
 
@@ -76,11 +76,21 @@ fi
 mount_source="$(findmnt -n -o SOURCE --target "${data_mount}" 2>/dev/null || true)"
 mount_target="$(findmnt -n -o TARGET --target "${data_mount}" 2>/dev/null || true)"
 mount_source="${mount_source%%[*}"
+source_device="$(readlink -f "${mount_source}" 2>/dev/null || true)"
+root_source="$(findmnt -n -o SOURCE --target / 2>/dev/null || true)"
+root_source="${root_source%%[*}"
+root_device="$(readlink -f "${root_source}" 2>/dev/null || true)"
 if [[ "${mount_target}" != "${data_mount}" ]] \
-  || [[ "$(readlink -f "${mount_source}" 2>/dev/null || true)" != "$(readlink -f "${data_device}" 2>/dev/null || true)" ]]; then
-  echo "${data_mount} 不是 ${data_device} 的独立挂载点，拒绝启动容器。" >&2
+  || [[ -z "${source_device}" || ! -b "${source_device}" || "${source_device}" == "${root_device}" ]]; then
+  echo "${data_mount} 不是与系统根分区不同的独立数据盘挂载点，拒绝启动容器。" >&2
   exit 1
 fi
+if [[ -n "${data_device}" \
+  && "${source_device}" != "$(readlink -f "${data_device}" 2>/dev/null || true)" ]]; then
+  echo "${data_mount} 来源为 ${source_device}，不是指定设备 ${data_device}。" >&2
+  exit 1
+fi
+data_device="${source_device}"
 if [[ "${data_root}" != "${data_mount}"/* ]]; then
   echo "JX_HOST_DATA_DIR 必须位于数据盘 ${data_mount} 下。" >&2
   exit 1

@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 umask 077
 
-data_device="${DATA_DEVICE:-/dev/vda3}"
+data_device="${DATA_DEVICE:-}"
 data_mount="${DATA_MOUNT:-/data}"
 
 if [[ "${EUID}" -ne 0 ]]; then
@@ -16,18 +16,24 @@ for command_name in findmnt readlink; do
     exit 1
   }
 done
-if [[ ! -b "${data_device}" ]]; then
-  echo "找不到数据盘设备：${data_device}" >&2
-  exit 1
-fi
 mount_source="$(findmnt -n -o SOURCE --target "${data_mount}" 2>/dev/null || true)"
 mount_target="$(findmnt -n -o TARGET --target "${data_mount}" 2>/dev/null || true)"
 mount_source="${mount_source%%[*}"
+source_device="$(readlink -f "${mount_source}" 2>/dev/null || true)"
+root_source="$(findmnt -n -o SOURCE --target / 2>/dev/null || true)"
+root_source="${root_source%%[*}"
+root_device="$(readlink -f "${root_source}" 2>/dev/null || true)"
 if [[ "${mount_target}" != "${data_mount}" ]] \
-  || [[ "$(readlink -f "${mount_source}" 2>/dev/null || true)" != "$(readlink -f "${data_device}" 2>/dev/null || true)" ]]; then
-  echo "${data_mount} 必须是 ${data_device} 的独立挂载点；脚本不会自动格式化或挂载磁盘。" >&2
+  || [[ -z "${source_device}" || ! -b "${source_device}" || "${source_device}" == "${root_device}" ]]; then
+  echo "${data_mount} 必须是与系统根分区不同的独立数据盘挂载点；脚本不会自动格式化或挂载磁盘。" >&2
   exit 1
 fi
+if [[ -n "${data_device}" \
+  && "${source_device}" != "$(readlink -f "${data_device}" 2>/dev/null || true)" ]]; then
+  echo "${data_mount} 来源为 ${source_device}，不是指定设备 ${data_device}。" >&2
+  exit 1
+fi
+data_device="${source_device}"
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cloud_dir="$(cd -- "${script_dir}/.." && pwd)"
