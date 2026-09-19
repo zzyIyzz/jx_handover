@@ -377,6 +377,8 @@ class CloudSecurityUnitTest(unittest.TestCase):
         self.assertIn("/data/jx-handover/config/jx-handover.env", update_script)
         self.assertIn('JX_ADMIN_NAMES "周智源"', update_script)
         self.assertIn("verify_production_state", update_script)
+        self.assertIn("sync_root_tools", update_script)
+        self.assertIn("/root/update_jx_handover.sh", update_script)
         self.assertEqual(root_update_script, update_script)
         self.assertIn("/data/jx-handover/config/jx-handover.env", restore_ai_script)
         self.assertIn("persist_env_to_data_disk", restore_ai_script)

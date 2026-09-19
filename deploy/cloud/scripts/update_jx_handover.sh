@@ -406,6 +406,28 @@ PY
     )
 }
 
+sync_root_tools() {
+    local scripts_dir="$PROJECT/deploy/cloud/scripts"
+    local source=""
+    local target=""
+    local -a mappings=(
+        "update_jx_handover.sh:/root/update_jx_handover.sh"
+        "prepare-data-disk-v0.5.4.sh:/root/prepare-data-disk-v0.5.4.sh"
+        "restore-ai.sh:/root/restore-ai.sh"
+        "one-click-v0.5.4.sh:/root/one-click-v0.5.4.sh"
+    )
+    for mapping in "${mappings[@]}"; do
+        source="$scripts_dir/${mapping%%:*}"
+        target="${mapping#*:}"
+        [ -f "$source" ] || {
+            error "新版仓库缺少 root 工具：$source"
+            return 1
+        }
+        install -o root -g root -m 700 "$source" "$target"
+    done
+    success "root 升级、数据盘和 AI 工具已同步到本次最新版本"
+}
+
 cleanup_temp() {
     if [ -n "$HEALTH_FILE" ] && [ -f "$HEALTH_FILE" ]; then
         rm -f -- "$HEALTH_FILE"
@@ -1005,6 +1027,9 @@ PY
         warn "AI 代码已恢复为自动模式，但尚无 Key，当前仍会使用本地规则。"
         warn "执行：sudo env PROJECT='$PROJECT' SERVICE='$SERVICE' bash restore-ai.sh"
     fi
+
+    info "同步 /root 运维工具"
+    sync_root_tools
 
     info "清理历史备份"
     local -a old_backups=()
